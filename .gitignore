@@ -3,7 +3,6 @@
 # ====================================================================
 .env
 service_account.json
-tiktok_session.json
 raw_user_cookies.txt
 *.pem
 *.key
