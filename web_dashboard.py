@@ -587,6 +587,13 @@ def screenshot():
             return send_file(str(p), mimetype="image/png")
     return jsonify({"error": "No screenshot available"}), 404
 
+@app.route("/api/screenshot/qr")
+def qr_screenshot():
+    p = config.TEMP_DIR / "login_qr.png"
+    if p.exists():
+        return send_file(str(p), mimetype="image/png")
+    return jsonify({"error": "No QR screenshot found"}), 404
+
 @app.route("/api/qr/start", methods=["POST", "GET"])
 def qr_start():
     from qr_login import TikTokQRLoginManager

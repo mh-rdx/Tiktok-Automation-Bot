@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any
 
 from playwright.sync_api import sync_playwright
 import requests
+import base64
 
 import config
 
@@ -104,12 +105,23 @@ class TikTokQRLoginManager:
                 """)
 
                 page = context.new_page()
-                page.goto("https://www.tiktok.com/login/qrcode", wait_until="domcontentloaded", timeout=60000)
+                logger.info("Opening TikTok login page for QR code...")
+                page.goto("https://www.tiktok.com/login", wait_until="domcontentloaded", timeout=60000)
                 page.wait_for_timeout(3000)
 
-                # Extract base64 image data
+                # Check for and click "Use QR code" button if present
+                for _ in range(5):
+                    qr_btn = page.locator('text="Use QR code", a:has-text("Use QR code"), div:has-text("Use QR code")').first
+                    if qr_btn.count() > 0 and qr_btn.is_visible():
+                        logger.info("Clicking 'Use QR code' button...")
+                        qr_btn.click()
+                        page.wait_for_timeout(3000)
+                        break
+                    page.wait_for_timeout(1000)
+
+                # Extract base64 image data or element screenshot
                 found_qr = None
-                for _ in range(20):
+                for _ in range(15):
                     imgs = page.locator('img').all()
                     for img in imgs:
                         src = img.get_attribute('src') or ''
@@ -118,17 +130,25 @@ class TikTokQRLoginManager:
                             break
                     if found_qr:
                         break
+
+                    # Fallback to screenshotting the QR container element
+                    qr_box = page.locator('div[data-e2e="qr-code"], canvas, .qrcode-image, div[class*="qrcode"]').first
+                    if qr_box.count() > 0 and qr_box.is_visible():
+                        b_bytes = qr_box.screenshot()
+                        found_qr = "data:image/png;base64," + base64.b64encode(b_bytes).decode("utf-8")
+                        break
+
                     page.wait_for_timeout(500)
 
                 if not found_qr:
-                    qr_pic = config.TEMP_DIR / "login_qr.png"
-                    page.screenshot(path=str(qr_pic))
-                    found_qr = "/api/screenshot/qr"
+                    # Final fallback: full page screenshot as base64
+                    page_bytes = page.screenshot()
+                    found_qr = "data:image/png;base64," + base64.b64encode(page_bytes).decode("utf-8")
 
                 with self.state_lock:
                     self.qr_image_data = found_qr
                     self.status = "waiting_for_scan"
-                logger.info("TikTok QR code extracted successfully. Waiting for phone scan...")
+                logger.info("TikTok QR code extracted successfully as base64. Waiting for phone scan...")
 
                 # Wait up to 3 minutes for phone scan & authorization
                 start_time = time.time()
