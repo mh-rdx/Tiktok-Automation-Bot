@@ -245,7 +245,8 @@ class TikTokUploader:
                 page.wait_for_timeout(10000)
 
 
-                for btn_text in ["Turn on", "Got it", "Cancel"]:
+                # Dismiss benign onboarding or permission modals (e.g. "Turn on", "Got it")
+                for btn_text in ["Turn on", "Got it", "Not now", "Dismiss", "Close"]:
                     try:
                         modal_btn = page.locator(f'button:has-text("{btn_text}")').first
                         if modal_btn.count() > 0 and modal_btn.is_visible():
@@ -254,6 +255,16 @@ class TikTokUploader:
                             page.wait_for_timeout(1000)
                     except Exception:
                         pass
+
+                # Safety check: if 'Sure you want to cancel your upload?' dialog appears, click 'No'
+                try:
+                    no_btn = page.locator('button:text-is("No"), button:has-text("No")').first
+                    if no_btn.count() > 0 and no_btn.is_visible():
+                        logger.info("Dismissed unexpected cancel upload dialog by clicking 'No'.")
+                        no_btn.click(force=True)
+                        page.wait_for_timeout(500)
+                except Exception:
+                    pass
 
                 try:
                     page.keyboard.press("Escape")
@@ -310,10 +321,29 @@ class TikTokUploader:
                 logger.info("Waiting for video upload & server processing to complete (up to 6 mins)...")
                 is_ready = False
                 for attempt in range(120):  # 120 * 3s = 360 seconds (6 minutes)
-                    if post_btn.is_enabled():
-                        is_ready = True
-                        logger.info("Post button is enabled and ready to publish!")
-                        break
+                    try:
+                        # Re-locate post button to avoid stale element references on React re-render
+                        candidate_btn = page.locator(
+                            'button.Button__root--type-primary:has-text("Post"), '
+                            'button:not([data-tt*="Sidebar"]):text-is("Post"), '
+                            'button:not([data-tt*="Sidebar"]):has-text("Post")'
+                        ).first
+                        if candidate_btn.count() > 0 and candidate_btn.is_enabled():
+                            post_btn = candidate_btn
+                            is_ready = True
+                            logger.info("Post button is enabled and ready to publish!")
+                            break
+                    except Exception:
+                        pass
+
+                    # Dismiss any unexpected cancel upload dialog
+                    try:
+                        no_btn = page.locator('button:text-is("No"), button:has-text("No")').first
+                        if no_btn.count() > 0 and no_btn.is_visible():
+                            no_btn.click(force=True)
+                    except Exception:
+                        pass
+
                     if attempt % 5 == 0:
                         logger.info(f"Video still processing on TikTok servers... ({attempt * 3}s elapsed)")
                     page.wait_for_timeout(3000)

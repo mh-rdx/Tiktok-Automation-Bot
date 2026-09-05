@@ -24,6 +24,7 @@ __pycache__/
 # RUNTIME LOGS, STATE & SCRATCH MEDIA
 # ====================================================================
 bot.log
+local_test_upload.log
 state.json
 temp/
 *.mp4
