@@ -48,24 +48,86 @@ class TikTokUploader:
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
-                    "--disable-infobars"
+                    "--disable-infobars",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--window-size=1920,1080"
                 ]
             )
             context = browser.new_context(
                 viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                locale="en-US",
+                timezone_id="America/New_York"
             )
 
-            # Inject full suite of session cookies for complete authentication
+            # Anti-bot detection mitigation script
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                Object.defineProperty(navigator, 'platform', {
+                    get: () => 'Win32'
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                window.chrome = {
+                    runtime: {},
+                    loadTimes: function() {},
+                    csi: function() {},
+                    app: {}
+                };
+            """)
+
+            # Inject session cookies
             cookies = []
-            for c_name in ["sessionid", "sessionid_ss", "sid_tt", "sid_guard"]:
-                cookies.append({
-                    "name": c_name,
-                    "value": self.session_id,
-                    "domain": ".tiktok.com",
-                    "path": "/"
-                })
-            context.add_cookies(cookies)
+            # 1. Check if full cookie suite JSON is provided
+            if hasattr(config, "TIKTOK_COOKIES_JSON") and config.TIKTOK_COOKIES_JSON.strip():
+                try:
+                    full_cookies = json.loads(config.TIKTOK_COOKIES_JSON.strip())
+                    if isinstance(full_cookies, list):
+                        for c in full_cookies:
+                            c_dict = {
+                                "name": c.get("name"),
+                                "value": c.get("value"),
+                                "domain": c.get("domain", ".tiktok.com"),
+                                "path": c.get("path", "/"),
+                            }
+                            if "secure" in c:
+                                c_dict["secure"] = c["secure"]
+                            if "httpOnly" in c:
+                                c_dict["httpOnly"] = c["httpOnly"]
+                            if "sameSite" in c and c["sameSite"] in ["Strict", "Lax", "None"]:
+                                c_dict["sameSite"] = c["sameSite"]
+                            cookies.append(c_dict)
+                        logger.info(f"Loaded {len(cookies)} cookies from TIKTOK_COOKIES_JSON")
+                except Exception as c_err:
+                    logger.warning(f"Could not parse TIKTOK_COOKIES_JSON: {c_err}")
+
+            # 2. Inject session_id cookies across domains with secure attributes
+            clean_sid = str(self.session_id or "").strip().strip('"').strip("'")
+            if clean_sid:
+                for domain in [".tiktok.com", "www.tiktok.com"]:
+                    for c_name in ["sessionid", "sessionid_ss", "sid_tt", "sid_guard"]:
+                        # Only add if not already in cookies list
+                        if not any(c.get("name") == c_name and c.get("domain") == domain for c in cookies):
+                            cookies.append({
+                                "name": c_name,
+                                "value": clean_sid,
+                                "domain": domain,
+                                "path": "/",
+                                "secure": True,
+                                "httpOnly": True,
+                                "sameSite": "None"
+                            })
+
+            if cookies:
+                context.add_cookies(cookies)
+                logger.info(f"Successfully injected {len(cookies)} TikTok session cookies into Playwright context.")
 
             page = context.new_page()
 
@@ -74,12 +136,21 @@ class TikTokUploader:
                 upload_url = "https://www.tiktok.com/tiktokstudio/upload?from=creator_center&tab=video"
                 logger.info(f"Navigating to TikTok Studio Upload: {upload_url}")
                 page.goto(upload_url, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(4000)
+                page.wait_for_timeout(6000)
+
+                current_url = page.url
+                logger.info(f"TikTok Page loaded. Current URL: {current_url}")
 
                 # Check if session is valid
-                if "login" in page.url:
+                if "login" in current_url.lower():
+                    err_pic = config.TEMP_DIR / "tiktok_error.png"
+                    try:
+                        page.screenshot(path=str(err_pic))
+                        logger.warning(f"Saved login redirect screenshot to {err_pic}")
+                    except Exception:
+                        pass
                     raise TikTokUploadError(
-                        "TikTok sessionid expired or invalidated. Please refresh your sessionid cookie from TikTok Studio."
+                        f"TikTok session rejected. Redirected to login: {current_url}. Please refresh your session cookies."
                     )
 
                 # Fallback check for + Upload button if not directly on upload dropzone

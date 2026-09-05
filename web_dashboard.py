@@ -471,6 +471,14 @@ def trigger():
     bot_state["sub_status"] = "Processing queue immediately..."
     return jsonify({"success": True, "message": "Trigger received! Bot will process next video now."})
 
+@app.route("/api/screenshot")
+def screenshot():
+    for fname in ["tiktok_published_verified.png", "tiktok_post_result.png", "tiktok_upload_err.png", "tiktok_error.png"]:
+        p = config.TEMP_DIR / fname
+        if p.exists():
+            return send_file(str(p), mimetype="image/png")
+    return jsonify({"error": "No screenshot available"}), 404
+
 def run_web_server():
     port = int(os.getenv("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)

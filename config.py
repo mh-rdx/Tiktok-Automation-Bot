@@ -31,6 +31,7 @@ DRIVE_FOLDER_ID = _get_env("GOOGLE_DRIVE_FOLDER_ID", required=False)
 
 # TikTok API & Session Settings
 TIKTOK_SESSION_ID = _get_env("TIKTOK_SESSION_ID", required=False)
+TIKTOK_COOKIES_JSON = _get_env("TIKTOK_COOKIES_JSON", required=False)
 TIKTOK_ACCESS_TOKEN = _get_env("TIKTOK_ACCESS_TOKEN", required=False)
 TIKTOK_OPEN_ID = _get_env("TIKTOK_OPEN_ID", required=False)
 DEFAULT_CAPTION = _get_env("DEFAULT_CAPTION", "Daily Reel! #fyp #trending", required=False)
