@@ -287,9 +287,9 @@ DASHBOARD_HTML = """
         <span id="current-substatus" style="font-size: 13px; color: var(--text-muted);"></span>
       </div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-        <button class="btn-trigger" style="background:#25f4ee; color:#07090e; box-shadow:0 4px 14px rgba(37,244,238,0.3);" onclick="openQrModal()">
+        <a href="/qr" class="btn-trigger" style="background:#25f4ee; color:#07090e; box-shadow:0 4px 14px rgba(37,244,238,0.3); text-decoration:none;">
           <span>📱</span> Connect TikTok QR
-        </button>
+        </a>
         <button class="btn-trigger" onclick="triggerManualPost()">
           <span>🚀</span> Post Next Reel Now
         </button>
@@ -606,6 +606,131 @@ def qr_status():
     from qr_login import TikTokQRLoginManager
     manager = TikTokQRLoginManager()
     return jsonify(manager.get_status())
+
+@app.route("/qr")
+def qr_page():
+    from qr_login import TikTokQRLoginManager
+    manager = TikTokQRLoginManager()
+    st = manager.get_status()
+    if st["status"] == "idle":
+        st = manager.start_login_session()
+
+    qr_img = st.get("qr_image") or ""
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Scan TikTok QR Code | TIME PASS</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <link rel="preconnect" href="https://fonts.googleapis.com">
+      <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+      <style>
+        body {
+          background: #07090e;
+          color: #f3f4f6;
+          font-family: 'Outfit', sans-serif;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          margin: 0;
+          padding: 20px;
+          text-align: center;
+        }
+        .box {
+          background: #121826;
+          border: 1px solid rgba(254,44,85,0.4);
+          box-shadow: 0 0 50px rgba(254,44,85,0.25);
+          border-radius: 20px;
+          padding: 32px 24px;
+          max-width: 440px;
+          width: 100%;
+          box-sizing: border-box;
+        }
+        .qr-card {
+          background: #ffffff;
+          padding: 16px;
+          border-radius: 16px;
+          display: inline-block;
+          margin: 16px 0;
+          min-width: 250px;
+          min-height: 250px;
+        }
+        img {
+          width: 250px;
+          height: 250px;
+          display: block;
+          object-fit: contain;
+        }
+        .instructions {
+          color: #9ca3af;
+          font-size: 14px;
+          line-height: 1.6;
+          margin-bottom: 16px;
+          text-align: left;
+        }
+        .btn {
+          background: #fe2c55;
+          color: #fff;
+          border: none;
+          padding: 10px 20px;
+          border-radius: 10px;
+          font-weight: 700;
+          cursor: pointer;
+          font-size: 14px;
+          text-decoration: none;
+          display: inline-block;
+        }
+        #status-text {
+          font-size: 15px;
+          font-weight: 700;
+          color: #25f4ee;
+          margin-top: 8px;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="box">
+        <h1 style="font-size:24px; margin-bottom:12px; background:linear-gradient(135deg, #fe2c55, #25f4ee); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">📱 Connect TikTok Account</h1>
+        <div class="instructions">
+          1. Open <b>TikTok App</b> on your mobile phone.<br>
+          2. Tap <b>Profile ➔ ☰ Menu ➔ My QR Code ➔ 📷 Scan icon</b>.<br>
+          3. Point your camera at this QR code & tap <b>Confirm Login</b>.
+        </div>
+        <div class="qr-card">
+          <img id="qrImg" src="{{ qr_img }}" alt="TikTok QR Code" />
+        </div>
+        <div id="status-text">Waiting for phone scan...</div>
+        <br>
+        <div style="display:flex; justify-content:center; gap:10px; margin-top:10px;">
+          <a href="/" class="btn" style="background:#374151;">← Dashboard</a>
+          <button onclick="location.reload()" class="btn">🔄 Refresh</button>
+        </div>
+      </div>
+      <script>
+        setInterval(async function() {
+          try {
+            var r = await fetch('/api/qr/status');
+            var d = await r.json();
+            if (d.qr_image && d.qr_image.length > 50) {
+              document.getElementById('qrImg').src = d.qr_image;
+            }
+            if (d.status === 'authenticated') {
+              document.getElementById('status-text').innerText = '🎉 Login Confirmed! TikTok Connected.';
+              document.getElementById('status-text').style.color = '#10b981';
+              setTimeout(function(){ window.location.href = '/'; }, 2000);
+            } else if (d.status === 'expired') {
+              document.getElementById('status-text').innerText = '⚠️ QR Expired. Click Refresh.';
+              document.getElementById('status-text').style.color = '#f59e0b';
+            }
+          } catch(e) {}
+        }, 2000);
+      </script>
+    </body>
+    </html>
+    """, qr_img=qr_img)
 
 def run_web_server():
     port = int(os.getenv("PORT", "8080"))
