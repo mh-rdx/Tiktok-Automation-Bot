@@ -43,6 +43,7 @@ if not WATERMARK_PATH.is_absolute():
 
 WATERMARK_WIDTH_RATIO = float(os.getenv("WATERMARK_WIDTH_RATIO", "0.15"))
 WATERMARK_PADDING = int(os.getenv("WATERMARK_PADDING", "10"))
+ANTI_DUPLICATE_FILTER = os.getenv("ANTI_DUPLICATE_FILTER", "true").lower() in ("true", "1", "yes")
 
 # Scheduling & Rate Limiting Settings
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "5"))

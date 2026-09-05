@@ -133,13 +133,37 @@ class VideoProcessor:
             f"Base video={video_w}x{video_h}, Logo width={target_logo_w}px (15%), Padding={padding}px"
         )
 
-        # Filter explanation:
-        # [1:v]scale={w}:-1[wm] -> scales the logo to calculated width, preserving aspect ratio
-        # [0:v][wm]overlay=W-w-pad:H-h-pad -> positions at bottom-right minus padding
-        filter_complex = (
-            f"[1:v]scale={target_logo_w}:-1[wm];"
-            f"[0:v][wm]overlay=W-w-{padding}:H-h-{padding}:format=auto"
-        )
+        use_anti_dup = getattr(config, "ANTI_DUPLICATE_FILTER", True)
+
+        # Micro-crop dimensions: ensure even integers for libx264
+        crop_w = int(video_w * 0.97)
+        if crop_w % 2 != 0:
+            crop_w -= 1
+        crop_h = int(video_h * 0.97)
+        if crop_h % 2 != 0:
+            crop_h -= 1
+
+        if use_anti_dup:
+            logger.info("Applying Anti-Duplicate & Transformative filter (micro-zoom, color grading, 1.02x tempo, metadata stripping).")
+            # Filter explanation:
+            # 1. crop+scale: micro-crops edges to strip hardcoded logos and alter pixel grids
+            # 2. eq: slight contrast/brightness tweak alters perceptual color histograms
+            # 3. setpts+atempo: 1.02x speed shifts frame durations and audio waveforms (breaks hash match)
+            # 4. overlay: positions TIME PASS logo at bottom-right
+            filter_complex = (
+                f"[0:v]crop={crop_w}:{crop_h},scale={video_w}:{video_h},"
+                f"eq=contrast=1.02:brightness=0.01:saturation=1.03,setpts=0.98039*PTS[v0];"
+                f"[1:v]scale={target_logo_w}:-1[wm];"
+                f"[v0][wm]overlay=W-w-{padding}:H-h-{padding}:format=auto[outv];"
+                f"[0:a]atempo=1.02[outa]"
+            )
+            map_args = ["-map", "[outv]", "-map", "[outa]"]
+        else:
+            filter_complex = (
+                f"[1:v]scale={target_logo_w}:-1[wm];"
+                f"[0:v][wm]overlay=W-w-{padding}:H-h-{padding}:format=auto"
+            )
+            map_args = []
 
         cmd = [
             "ffmpeg",
@@ -147,6 +171,7 @@ class VideoProcessor:
             "-i", str(input_video),              # Primary video stream [0]
             "-i", str(config.WATERMARK_PATH),    # Logo watermark stream [1]
             "-filter_complex", filter_complex,
+        ] + map_args + [
             "-c:v", "libx264",                   # Fast, universally supported H.264
             "-preset", "fast",                   # Balance between encode speed & compression
             "-crf", "23",                        # Visually near-lossless standard for web
@@ -154,6 +179,7 @@ class VideoProcessor:
             "-c:a", "aac",                       # Universal audio codec
             "-b:a", "128k",                      # Standard stereo quality
             "-movflags", "+faststart",           # Move index to head of MP4 for instant streaming
+            "-map_metadata", "-1",               # Strip all camera/creator/source metadata
             str(output_video)
         ]
 

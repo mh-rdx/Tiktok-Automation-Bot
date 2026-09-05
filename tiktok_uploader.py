@@ -245,32 +245,8 @@ class TikTokUploader:
                 page.wait_for_timeout(10000)
 
 
-                # Dismiss benign onboarding or permission modals (e.g. "Turn on", "Got it")
-                for btn_text in ["Turn on", "Got it", "Not now", "Dismiss", "Close"]:
-                    try:
-                        modal_btn = page.locator(f'button:has-text("{btn_text}")').first
-                        if modal_btn.count() > 0 and modal_btn.is_visible():
-                            logger.info(f"Dismissing modal button: '{btn_text}'")
-                            modal_btn.click()
-                            page.wait_for_timeout(1000)
-                    except Exception:
-                        pass
-
-                # Safety check: if 'Sure you want to cancel your upload?' dialog appears, click 'No'
-                try:
-                    no_btn = page.locator('button:text-is("No"), button:has-text("No")').first
-                    if no_btn.count() > 0 and no_btn.is_visible():
-                        logger.info("Dismissed unexpected cancel upload dialog by clicking 'No'.")
-                        no_btn.click(force=True)
-                        page.wait_for_timeout(500)
-                except Exception:
-                    pass
-
-                try:
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(300)
-                except Exception:
-                    pass
+                # Dismiss any initial onboarding or permission modals
+                self._dismiss_advisory_and_check_modals(page)
 
                 # Enter Caption
                 caption_selector = '.public-DraftEditor-content, div[contenteditable="true"], .notranslate[contenteditable="true"]'
@@ -321,6 +297,9 @@ class TikTokUploader:
                 logger.info("Waiting for video upload & server processing to complete (up to 6 mins)...")
                 is_ready = False
                 for attempt in range(120):  # 120 * 3s = 360 seconds (6 minutes)
+                    # Regularly dismiss any check/advisory modals that pop up during processing
+                    self._dismiss_advisory_and_check_modals(page)
+
                     try:
                         # Re-locate post button to avoid stale element references on React re-render
                         candidate_btn = page.locator(
@@ -336,14 +315,6 @@ class TikTokUploader:
                     except Exception:
                         pass
 
-                    # Dismiss any unexpected cancel upload dialog
-                    try:
-                        no_btn = page.locator('button:text-is("No"), button:has-text("No")').first
-                        if no_btn.count() > 0 and no_btn.is_visible():
-                            no_btn.click(force=True)
-                    except Exception:
-                        pass
-
                     if attempt % 5 == 0:
                         logger.info(f"Video still processing on TikTok servers... ({attempt * 3}s elapsed)")
                     page.wait_for_timeout(3000)
@@ -351,45 +322,57 @@ class TikTokUploader:
                 if not is_ready:
                     raise TikTokUploadError("Video processing timed out on TikTok Studio after 6 minutes.")
 
+                # Dismiss any lingering advisory modals before clicking Post
+                self._dismiss_advisory_and_check_modals(page)
+
                 # Scroll into view and click
                 post_btn.scroll_into_view_if_needed()
                 page.wait_for_timeout(500)
                 logger.info("Clicking Post button...")
                 post_btn.click(force=True)
 
-                # Wait for publish confirmation or secondary modals
-                logger.info("Waiting for publish confirmation & handling modals...")
+                # Wait for publish confirmation & actively handle all secondary modals
+                logger.info("Waiting for publish confirmation & actively handling any confirmation/advisory modals...")
                 published = False
                 for attempt in range(60):  # 60 * 2s = 120 seconds
                     page.wait_for_timeout(2000)
 
-                    # 1. If "Continue to post?" modal appears, click "Post now"!
-                    post_now_btn = page.locator('button:has-text("Post now"), button:text-is("Post now")').first
-                    if post_now_btn.count() > 0 and post_now_btn.is_visible():
-                        logger.info("Detected 'Continue to post?' modal! Clicking 'Post now' button...")
-                        post_now_btn.click(force=True)
-                        page.wait_for_timeout(2000)
+                    # 1. Handle confirmation modals (e.g. "Post now", "Post anyway", "Continue to post")
+                    self._handle_post_confirmation_modals(page)
 
-                    # 2. If unsaved changes modal appears, click "Cancel" to remain on page
-                    exit_btn = page.locator('button:has-text("Exit")').first
-                    if exit_btn.count() > 0 and exit_btn.is_visible():
-                        logger.warning("Unsaved changes modal detected! Clicking Cancel...")
-                        cancel_btn = page.locator('button:text-is("Cancel")').first
-                        if cancel_btn.count() > 0:
-                            cancel_btn.click(force=True)
+                    # 2. Dismiss any advisory modals (e.g. "Content may be restricted", "Copyright check")
+                    self._dismiss_advisory_and_check_modals(page)
 
+                    # 3. Check for successful publish confirmation
                     url = page.url
                     content = page.content().lower()
                     if (
                         "/content" in url
+                        or "/posts" in url
                         or "your video has been uploaded" in content
                         or "manage your posts" in content
                         or "post another video" in content
                         or "view post" in content
+                        or "video published" in content
+                        or "✓ video published" in content
                     ):
                         logger.info(f"TikTok post published successfully! Confirmation detected (URL: {url})")
                         published = True
                         break
+
+                    # 4. If main Post button is STILL visible and enabled (modal previously blocked it), re-click Post!
+                    if attempt % 3 == 0 and attempt > 0:
+                        try:
+                            re_post = page.locator(
+                                'button.Button__root--type-primary:has-text("Post"), '
+                                'button:not([data-tt*="Sidebar"]):text-is("Post"), '
+                                'button:not([data-tt*="Sidebar"]):has-text("Post")'
+                            ).first
+                            if re_post.count() > 0 and re_post.is_visible() and re_post.is_enabled():
+                                logger.info("Main 'Post' button is still visible and ready. Re-clicking Post...")
+                                re_post.click(force=True)
+                        except Exception:
+                            pass
 
                 diag_path = config.TEMP_DIR / "tiktok_post_result.png"
                 page.screenshot(path=str(diag_path))
@@ -415,6 +398,148 @@ class TikTokUploader:
                     pass
                 browser.close()
                 raise TikTokUploadError(f"Playwright TikTok upload failed: {e}")
+
+    def _dismiss_advisory_and_check_modals(self, page) -> bool:
+        """
+        Detects and safely dismisses advisory or check modals on TikTok Studio:
+        - 'Content may be restricted' (Content check lite / Unoriginal content warning)
+        - 'Music copyright check'
+        - 'Turn on high quality' / Permissions
+        - Benign onboarding prompts
+        Returns True if a modal was handled.
+        """
+        handled = False
+        try:
+            # 1. Check if 'Content may be restricted' or similar advisory text is present
+            page_text = page.content().lower()
+            advisory_keywords = [
+                "content may be restricted",
+                "unoriginal, low-quality",
+                "violation reason",
+                "content check lite",
+                "music copyright check",
+                "copyright issue",
+            ]
+            if any(kw in page_text for kw in advisory_keywords):
+                # Acknowledge / continue buttons if present
+                for ack_text in ["Post anyway", "Continue to post", "Publish anyway", "Got it", "Understood", "I understand", "Dismiss", "Acknowledge"]:
+                    try:
+                        ack_btn = page.locator(f'button:has-text("{ack_text}")').first
+                        if ack_btn.count() > 0 and ack_btn.is_visible():
+                            logger.info(f"Clicking modal acknowledgment button: '{ack_text}'")
+                            ack_btn.click(force=True)
+                            page.wait_for_timeout(1000)
+                            handled = True
+                            break
+                    except Exception:
+                        pass
+
+                # Look for modal close 'X' button inside modal dialog
+                close_selectors = [
+                    'div[role="dialog"] button[aria-label*="close" i]',
+                    'div[role="dialog"] button[aria-label*="Close" i]',
+                    'div[role="dialog"] button:has(svg)',
+                    '.TUXModal button[aria-label*="close" i]',
+                    '.tux-modal button:has(svg)',
+                    'div[class*="modal" i] button[aria-label*="close" i]',
+                    'div[class*="modal" i] button:has(svg)',
+                    'button[aria-label="Close"]',
+                    'button[aria-label="close"]',
+                ]
+                for sel in close_selectors:
+                    try:
+                        c_btn = page.locator(sel).first
+                        if c_btn.count() > 0 and c_btn.is_visible():
+                            btn_text = c_btn.inner_text().strip().lower()
+                            # Never click 'replace video' or 'cancel'
+                            if "replace" not in btn_text and "cancel" not in btn_text:
+                                logger.info(f"Dismissing advisory modal via close button ({sel})")
+                                c_btn.click(force=True)
+                                page.wait_for_timeout(1000)
+                                handled = True
+                                break
+                    except Exception:
+                        pass
+
+                # Press Escape as fallback to dismiss open modal
+                try:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(500)
+                except Exception:
+                    pass
+
+            # 2. General benign modals ("Turn on", "Got it", "Not now", "Dismiss", "Close")
+            for btn_text in ["Turn on", "Got it", "Not now", "Dismiss", "Close"]:
+                try:
+                    m_btn = page.locator(f'button:text-is("{btn_text}"), button:has-text("{btn_text}")').first
+                    if m_btn.count() > 0 and m_btn.is_visible():
+                        logger.info(f"Dismissing benign modal button: '{btn_text}'")
+                        m_btn.click(force=True)
+                        page.wait_for_timeout(500)
+                        handled = True
+                except Exception:
+                    pass
+
+            # 3. Safety check: if 'Sure you want to cancel your upload?' dialog appears, click 'No'
+            try:
+                no_btn = page.locator('button:text-is("No"), button:has-text("No")').first
+                if no_btn.count() > 0 and no_btn.is_visible():
+                    logger.info("Dismissed unexpected cancel upload dialog by clicking 'No'.")
+                    no_btn.click(force=True)
+                    page.wait_for_timeout(500)
+                    handled = True
+            except Exception:
+                pass
+
+        except Exception as e:
+            logger.debug(f"Notice in _dismiss_advisory_and_check_modals: {e}")
+
+        return handled
+
+    def _handle_post_confirmation_modals(self, page) -> bool:
+        """
+        Detects if clicking Post prompted a secondary confirmation dialog:
+        - 'Post now'
+        - 'Post anyway'
+        - 'Continue to post'
+        - 'Publish anyway'
+        - 'Confirm'
+        Clicks the confirmation to finalize publishing.
+        """
+        handled = False
+        try:
+            for btn_text in [
+                "Post now",
+                "Post anyway",
+                "Continue to post",
+                "Publish anyway",
+                "Confirm post",
+                "Confirm",
+            ]:
+                try:
+                    btn = page.locator(f'button:text-is("{btn_text}"), button:has-text("{btn_text}")').first
+                    if btn.count() > 0 and btn.is_visible():
+                        logger.info(f"Detected post confirmation dialog! Clicking: '{btn_text}'")
+                        btn.click(force=True)
+                        page.wait_for_timeout(2000)
+                        handled = True
+                        break
+                except Exception:
+                    pass
+
+            # If unsaved changes modal appears, click "Cancel" to remain on page
+            exit_btn = page.locator('button:has-text("Exit")').first
+            if exit_btn.count() > 0 and exit_btn.is_visible():
+                logger.warning("Unsaved changes modal detected! Clicking Cancel...")
+                cancel_btn = page.locator('button:text-is("Cancel")').first
+                if cancel_btn.count() > 0:
+                    cancel_btn.click(force=True)
+                    handled = True
+
+        except Exception as e:
+            logger.debug(f"Notice in _handle_post_confirmation_modals: {e}")
+
+        return handled
 
     def upload_via_api(self, video_path: Path, caption: Optional[str] = None) -> bool:
         """
