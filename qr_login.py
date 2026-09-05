@@ -110,38 +110,42 @@ class TikTokQRLoginManager:
                 page.wait_for_timeout(3000)
 
                 # Check for and click "Use QR code" button if present
-                for _ in range(5):
-                    qr_btn = page.locator('text="Use QR code", a:has-text("Use QR code"), div:has-text("Use QR code")').first
+                for attempt in range(8):
+                    qr_btn = page.locator('text="Use QR code"').first
                     if qr_btn.count() > 0 and qr_btn.is_visible():
                         logger.info("Clicking 'Use QR code' button...")
-                        qr_btn.click()
-                        page.wait_for_timeout(3000)
+                        qr_btn.click(force=True)
+                        try:
+                            page.wait_for_url("**/qrcode*", timeout=10000)
+                        except Exception:
+                            pass
                         break
                     page.wait_for_timeout(1000)
 
-                # Extract base64 image data or element screenshot
+                # Wait for QR canvas to render and extract dataURL directly
                 found_qr = None
-                for _ in range(15):
-                    imgs = page.locator('img').all()
-                    for img in imgs:
-                        src = img.get_attribute('src') or ''
-                        if src.startswith('data:image'):
-                            found_qr = src
-                            break
-                    if found_qr:
-                        break
-
-                    # Fallback to screenshotting the QR container element
-                    qr_box = page.locator('div[data-e2e="qr-code"], canvas, .qrcode-image, div[class*="qrcode"]').first
-                    if qr_box.count() > 0 and qr_box.is_visible():
-                        b_bytes = qr_box.screenshot()
-                        found_qr = "data:image/png;base64," + base64.b64encode(b_bytes).decode("utf-8")
-                        break
-
+                for _ in range(20):
+                    try:
+                        canvas = page.locator('canvas').first
+                        if canvas.count() > 0 and canvas.is_visible():
+                            found_qr = page.evaluate("() => document.querySelector('canvas')?.toDataURL('image/png')")
+                            if found_qr and len(found_qr) > 500:
+                                logger.info(f"Extracted live QR canvas dataURL ({len(found_qr)} chars)")
+                                break
+                    except Exception:
+                        pass
                     page.wait_for_timeout(500)
 
                 if not found_qr:
-                    # Final fallback: full page screenshot as base64
+                    try:
+                        c_loc = page.locator('canvas').first
+                        if c_loc.count() > 0:
+                            b_bytes = c_loc.screenshot()
+                            found_qr = "data:image/png;base64," + base64.b64encode(b_bytes).decode("utf-8")
+                    except Exception:
+                        pass
+
+                if not found_qr:
                     page_bytes = page.screenshot()
                     found_qr = "data:image/png;base64," + base64.b64encode(page_bytes).decode("utf-8")
 
