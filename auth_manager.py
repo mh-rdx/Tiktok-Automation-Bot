@@ -430,19 +430,28 @@ class TikTokAuthManager:
             return {"success": False, "error": "No valid cookies or session ID could be extracted."}
 
         # Format cookies into Playwright storage_state format directly
+        def normalize_samesite(val):
+            v = str(val or "").strip().lower()
+            if v == "strict":
+                return "Strict"
+            if v == "lax":
+                return "Lax"
+            return "None"
+
         pw_cookies = []
         for c in cookies_to_save:
             c_dict = {
-                "name": c.get("name"),
-                "value": c.get("value"),
+                "name": str(c.get("name", "")),
+                "value": str(c.get("value", "")),
                 "domain": c.get("domain", ".tiktok.com"),
                 "path": c.get("path", "/"),
                 "expires": c.get("expires", int(time.time()) + 86400 * 30),
-                "httpOnly": c.get("httpOnly", True),
-                "secure": c.get("secure", True),
-                "sameSite": c.get("sameSite", "None")
+                "httpOnly": bool(c.get("httpOnly", True)),
+                "secure": bool(c.get("secure", True)),
+                "sameSite": normalize_samesite(c.get("sameSite"))
             }
-            pw_cookies.append(c_dict)
+            if c_dict["name"] and c_dict["value"]:
+                pw_cookies.append(c_dict)
 
         storage_data = {
             "cookies": pw_cookies,

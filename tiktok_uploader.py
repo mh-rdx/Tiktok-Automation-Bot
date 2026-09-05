@@ -64,10 +64,30 @@ class TikTokUploader:
             }
             if session_file.exists():
                 try:
+                    # Sanitize any invalid sameSite values from browser cookie export
+                    with open(session_file, "r", encoding="utf-8") as sf:
+                        s_data = json.load(sf)
+                    changed = False
+                    for c in s_data.get("cookies", []):
+                        raw_ss = str(c.get("sameSite", "")).strip().lower()
+                        if raw_ss == "strict":
+                            clean_ss = "Strict"
+                        elif raw_ss == "lax":
+                            clean_ss = "Lax"
+                        else:
+                            clean_ss = "None"
+                        if c.get("sameSite") != clean_ss:
+                            c["sameSite"] = clean_ss
+                            changed = True
+                    if changed:
+                        with open(session_file, "w", encoding="utf-8") as sf:
+                            json.dump(s_data, sf, indent=2)
+                        logger.info("Sanitized sameSite cookie attributes in tiktok_session.json for Playwright.")
+
                     ctx_params["storage_state"] = str(session_file)
                     logger.info("Using saved authenticated browser storage state from tiktok_session.json")
                 except Exception as se:
-                    logger.warning(f"Could not load storage_state: {se}")
+                    logger.warning(f"Could not load/sanitize storage_state: {se}")
 
             context = browser.new_context(**ctx_params)
 
