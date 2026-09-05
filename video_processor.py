@@ -27,6 +27,31 @@ class VideoProcessor:
 
     def _verify_binaries(self) -> None:
         """Verifies that ffmpeg and ffprobe are installed and discoverable on PATH."""
+        # 1. Try static_ffmpeg auto-resolution if available
+        try:
+            import static_ffmpeg
+            static_ffmpeg.add_paths()
+        except Exception:
+            pass
+
+        # 2. Auto-search common Windows FFmpeg locations
+        import os
+        candidate_dirs = [
+            r"C:\ffmpeg",
+            r"C:\ffmpeg\bin",
+            str(config.BASE_DIR),
+        ]
+        # Recursively search C:\ffmpeg if it exists
+        if os.path.exists(r"C:\ffmpeg"):
+            for root, dirs, files in os.walk(r"C:\ffmpeg"):
+                if "ffmpeg.exe" in files:
+                    candidate_dirs.append(root)
+
+        current_path = os.environ.get("PATH", "")
+        for c_dir in candidate_dirs:
+            if os.path.isdir(c_dir) and c_dir not in current_path:
+                os.environ["PATH"] = c_dir + os.pathsep + os.environ.get("PATH", "")
+
         for binary in ["ffmpeg", "ffprobe"]:
             try:
                 subprocess.run(
