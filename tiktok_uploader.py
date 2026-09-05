@@ -56,6 +56,38 @@ class TikTokUploader:
                 ]
             )
             session_file = config.BASE_DIR / "tiktok_session.json"
+            
+            # If session_file does not exist on disk but TIKTOK_COOKIES_JSON is set, generate it
+            if not session_file.exists() and hasattr(config, "TIKTOK_COOKIES_JSON") and config.TIKTOK_COOKIES_JSON.strip():
+                try:
+                    full_cookies = json.loads(config.TIKTOK_COOKIES_JSON.strip())
+                    if isinstance(full_cookies, list):
+                        pw_cookies = []
+                        for c in full_cookies:
+                            raw_ss = str(c.get("sameSite", "")).strip().lower()
+                            if raw_ss == "strict":
+                                clean_ss = "Strict"
+                            elif raw_ss == "lax":
+                                clean_ss = "Lax"
+                            else:
+                                clean_ss = "None"
+                            exp = c.get("expirationDate") or c.get("expires") or (int(time.time()) + 86400 * 30)
+                            pw_cookies.append({
+                                "name": str(c.get("name", "")),
+                                "value": str(c.get("value", "")),
+                                "domain": c.get("domain", ".tiktok.com"),
+                                "path": c.get("path", "/"),
+                                "expires": float(exp),
+                                "httpOnly": bool(c.get("httpOnly", True)),
+                                "secure": bool(c.get("secure", True)),
+                                "sameSite": clean_ss
+                            })
+                        with open(session_file, "w", encoding="utf-8") as sf:
+                            json.dump({"cookies": pw_cookies, "origins": []}, sf, indent=2)
+                        logger.info(f"Auto-generated {session_file.name} from TIKTOK_COOKIES_JSON with {len(pw_cookies)} cookies.")
+                except Exception as ce:
+                    logger.warning(f"Could not build session_file from TIKTOK_COOKIES_JSON: {ce}")
+
             ctx_params = {
                 "viewport": {"width": 1920, "height": 1080},
                 "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -113,51 +145,53 @@ class TikTokUploader:
                 };
             """)
 
-            # Inject session cookies
-            cookies = []
-            # 1. Check if full cookie suite JSON is provided
-            if hasattr(config, "TIKTOK_COOKIES_JSON") and config.TIKTOK_COOKIES_JSON.strip():
-                try:
-                    full_cookies = json.loads(config.TIKTOK_COOKIES_JSON.strip())
-                    if isinstance(full_cookies, list):
-                        for c in full_cookies:
-                            c_dict = {
-                                "name": c.get("name"),
-                                "value": c.get("value"),
-                                "domain": c.get("domain", ".tiktok.com"),
-                                "path": c.get("path", "/"),
-                            }
-                            if "secure" in c:
-                                c_dict["secure"] = c["secure"]
-                            if "httpOnly" in c:
-                                c_dict["httpOnly"] = c["httpOnly"]
-                            if "sameSite" in c and c["sameSite"] in ["Strict", "Lax", "None"]:
-                                c_dict["sameSite"] = c["sameSite"]
-                            cookies.append(c_dict)
-                        logger.info(f"Loaded {len(cookies)} cookies from TIKTOK_COOKIES_JSON")
-                except Exception as c_err:
-                    logger.warning(f"Could not parse TIKTOK_COOKIES_JSON: {c_err}")
+            # Only inject fallback cookies from env vars if session_file does not exist
+            if not session_file.exists():
+                cookies = []
+                # 1. Check if full cookie suite JSON is provided
+                if hasattr(config, "TIKTOK_COOKIES_JSON") and config.TIKTOK_COOKIES_JSON.strip():
+                    try:
+                        full_cookies = json.loads(config.TIKTOK_COOKIES_JSON.strip())
+                        if isinstance(full_cookies, list):
+                            for c in full_cookies:
+                                c_dict = {
+                                    "name": c.get("name"),
+                                    "value": c.get("value"),
+                                    "domain": c.get("domain", ".tiktok.com"),
+                                    "path": c.get("path", "/"),
+                                }
+                                if "secure" in c:
+                                    c_dict["secure"] = c["secure"]
+                                if "httpOnly" in c:
+                                    c_dict["httpOnly"] = c["httpOnly"]
+                                if "sameSite" in c and c["sameSite"] in ["Strict", "Lax", "None"]:
+                                    c_dict["sameSite"] = c["sameSite"]
+                                cookies.append(c_dict)
+                            logger.info(f"Loaded {len(cookies)} cookies from TIKTOK_COOKIES_JSON")
+                    except Exception as c_err:
+                        logger.warning(f"Could not parse TIKTOK_COOKIES_JSON: {c_err}")
 
-            # 2. Inject session_id cookies across domains with secure attributes
-            clean_sid = str(self.session_id or "").strip().strip('"').strip("'")
-            if clean_sid:
-                for domain in [".tiktok.com", "www.tiktok.com"]:
-                    for c_name in ["sessionid", "sessionid_ss", "sid_tt", "sid_guard"]:
-                        # Only add if not already in cookies list
-                        if not any(c.get("name") == c_name and c.get("domain") == domain for c in cookies):
-                            cookies.append({
-                                "name": c_name,
-                                "value": clean_sid,
-                                "domain": domain,
-                                "path": "/",
-                                "secure": True,
-                                "httpOnly": True,
-                                "sameSite": "None"
-                            })
+                # 2. Inject session_id cookies across domains with secure attributes
+                clean_sid = str(self.session_id or "").strip().strip('"').strip("'")
+                if clean_sid:
+                    for domain in [".tiktok.com", "www.tiktok.com"]:
+                        for c_name in ["sessionid", "sessionid_ss", "sid_tt", "sid_guard"]:
+                            if not any(c.get("name") == c_name and c.get("domain") == domain for c in cookies):
+                                cookies.append({
+                                    "name": c_name,
+                                    "value": clean_sid,
+                                    "domain": domain,
+                                    "path": "/",
+                                    "secure": True,
+                                    "httpOnly": True,
+                                    "sameSite": "None"
+                                })
 
-            if cookies:
-                context.add_cookies(cookies)
-                logger.info(f"Successfully injected {len(cookies)} TikTok session cookies into Playwright context.")
+                if cookies:
+                    context.add_cookies(cookies)
+                    logger.info(f"Successfully injected {len(cookies)} TikTok session cookies into Playwright context.")
+            else:
+                logger.info("Using authenticated session_file storage_state without environment overrides.")
 
             page = context.new_page()
 

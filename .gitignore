@@ -3,6 +3,8 @@
 # ====================================================================
 .env
 service_account.json
+tiktok_session.json
+raw_user_cookies.txt
 *.pem
 *.key
 
@@ -25,8 +27,11 @@ bot.log
 state.json
 temp/
 *.mp4
+*.png
 scratch/
 scratch_*.py
+auto_extract_chrome.py
+do_login.py
 
 # ====================================================================
 # OS & IDE ARTIFACTS

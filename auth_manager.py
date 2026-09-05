@@ -445,7 +445,7 @@ class TikTokAuthManager:
                 "value": str(c.get("value", "")),
                 "domain": c.get("domain", ".tiktok.com"),
                 "path": c.get("path", "/"),
-                "expires": c.get("expires", int(time.time()) + 86400 * 30),
+                "expires": float(c.get("expires") or c.get("expirationDate") or (int(time.time()) + 86400 * 30)),
                 "httpOnly": bool(c.get("httpOnly", True)),
                 "secure": bool(c.get("secure", True)),
                 "sameSite": normalize_samesite(c.get("sameSite"))
