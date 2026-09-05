@@ -362,37 +362,118 @@ DASHBOARD_HTML = """
   <script>
     let countdownInterval = null;
     let nextPostTimestamp = null;
+    let qrPollInterval = null;
+
+    function openQrModal() {
+      var modal = document.getElementById('qrModal');
+      if (modal) modal.style.display = 'flex';
+      startQrFlow();
+    }
+
+    function closeQrModal() {
+      var modal = document.getElementById('qrModal');
+      if (modal) modal.style.display = 'none';
+      if (qrPollInterval) clearInterval(qrPollInterval);
+    }
+
+    async function startQrFlow() {
+      var spinner = document.getElementById('qr-spinner');
+      var img = document.getElementById('qr-img');
+      var statusMsg = document.getElementById('qr-status-msg');
+
+      if (spinner) spinner.style.display = 'block';
+      if (img) img.style.display = 'none';
+      if (statusMsg) {
+        statusMsg.innerText = 'Requesting QR code from TikTok...';
+        statusMsg.style.color = '#25f4ee';
+      }
+
+      if (qrPollInterval) clearInterval(qrPollInterval);
+
+      try {
+        var res = await fetch('/api/qr/start', { method: 'POST' });
+        var data = await res.json();
+        handleQrData(data);
+        qrPollInterval = setInterval(pollQrStatus, 2500);
+      } catch (e) {
+        if (statusMsg) {
+          statusMsg.innerText = 'Failed to request QR: ' + e;
+          statusMsg.style.color = '#fe2c55';
+        }
+      }
+    }
+
+    async function pollQrStatus() {
+      try {
+        var res = await fetch('/api/qr/status');
+        var data = await res.json();
+        handleQrData(data);
+      } catch (e) {
+        console.error('QR Poll error:', e);
+      }
+    }
+
+    function handleQrData(data) {
+      var spinner = document.getElementById('qr-spinner');
+      var img = document.getElementById('qr-img');
+      var statusMsg = document.getElementById('qr-status-msg');
+
+      if (data.qr_image && img) {
+        if (spinner) spinner.style.display = 'none';
+        img.src = data.qr_image;
+        img.style.display = 'block';
+      }
+      if (!statusMsg) return;
+
+      if (data.status === 'waiting_for_scan') {
+        statusMsg.innerText = 'Ready! Scan with TikTok App & tap Confirm.';
+        statusMsg.style.color = '#25f4ee';
+      } else if (data.status === 'authenticated') {
+        statusMsg.innerText = '🎉 Logged in successfully! TikTok Connected.';
+        statusMsg.style.color = '#10b981';
+        if (qrPollInterval) clearInterval(qrPollInterval);
+        setTimeout(function() { closeQrModal(); fetchStats(); }, 2500);
+      } else if (data.status === 'expired') {
+        statusMsg.innerText = '⚠️ QR Code expired. Click Refresh QR.';
+        statusMsg.style.color = '#f59e0b';
+        if (qrPollInterval) clearInterval(qrPollInterval);
+      } else if (data.status === 'error') {
+        statusMsg.innerText = '❌ Error: ' + (data.error || 'Failed');
+        statusMsg.style.color = '#fe2c55';
+        if (qrPollInterval) clearInterval(qrPollInterval);
+      }
+    }
 
     async function fetchStats() {
       try {
-        const res = await fetch('/api/status');
+        var res = await fetch('/api/status');
         if (!res.ok) return;
-        const data = await res.json();
+        var data = await res.json();
 
-        document.getElementById('current-status').innerText = data.status;
+        document.getElementById('current-status').innerText = data.status || 'Active';
         document.getElementById('current-substatus').innerText = data.sub_status || '';
-        document.getElementById('posts-today').innerText = ${data.posts_today} / ;
+        document.getElementById('posts-today').innerText = data.posts_today + ' / ' + data.daily_limit;
         
-        const pct = Math.min(100, (data.posts_today / data.daily_limit) * 100);
-        document.getElementById('daily-bar').style.width = ${pct}%;
+        var pct = Math.min(100, (data.posts_today / data.daily_limit) * 100);
+        document.getElementById('daily-bar').style.width = pct + '%';
 
-        document.getElementById('drive-queue').innerText = ${data.drive_queue_count} reels;
-        document.getElementById('uptime').innerText = data.uptime_str;
+        document.getElementById('drive-queue').innerText = data.drive_queue_count + ' reels';
+        document.getElementById('uptime').innerText = data.uptime_str || '0m';
 
         nextPostTimestamp = data.next_post_time;
         if (data.next_post_str) {
-          document.getElementById('next-post-time').innerText = Scheduled: ;
+          document.getElementById('next-post-time').innerText = 'Scheduled: ' + data.next_post_str;
         }
 
         // Render logs
-        const logsDiv = document.getElementById('logs-view');
+        var logsDiv = document.getElementById('logs-view');
         if (data.recent_logs && data.recent_logs.length > 0) {
-          logsDiv.innerHTML = data.recent_logs.map(l => {
-            let cls = 'log-line';
-            if (l.includes('[ERROR]')) cls += ' log-err';
-            else if (l.includes('[WARNING]')) cls += ' log-warn';
-            else if (l.includes('[INFO]')) cls += ' log-info';
-            return <div class=""></div>;
+          logsDiv.innerHTML = data.recent_logs.map(function(l) {
+            var cls = 'log-line';
+            if (l.indexOf('[ERROR]') !== -1) cls += ' log-err';
+            else if (l.indexOf('[WARNING]') !== -1) cls += ' log-warn';
+            else if (l.indexOf('[INFO]') !== -1) cls += ' log-info';
+            return '<div class="' + cls + '">' + escapeHtml(l) + '</div>';
           }).join('');
           logsDiv.scrollTop = logsDiv.scrollHeight;
         }
@@ -407,96 +488,30 @@ DASHBOARD_HTML = """
     }
 
     function updateCountdown() {
+      var el = document.getElementById('next-post-countdown');
       if (!nextPostTimestamp) {
-        document.getElementById('next-post-countdown').innerText = 'Ready / Active';
+        if (el) el.innerText = 'Ready / Active';
         return;
       }
-      const target = new Date(nextPostTimestamp).getTime();
-      const now = new Date().getTime();
-      const diff = target - now;
+      var target = new Date(nextPostTimestamp).getTime();
+      var now = new Date().getTime();
+      var diff = target - now;
       if (diff <= 0) {
-        document.getElementById('next-post-countdown').innerText = 'Due Now';
+        if (el) el.innerText = 'Due Now';
       } else {
-        const hours = Math.floor(diff / (1000 * 60 * 60));
-        const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-        const secs = Math.floor((diff % (1000 * 60)) / 1000);
-        document.getElementById('next-post-countdown').innerText = 
-          ${String(hours).padStart(2,'0')}::;
-      }
-    }
-
-    let qrPollInterval = null;
-
-    async function openQrModal() {
-      document.getElementById('qrModal').style.display = 'flex';
-      startQrFlow();
-    }
-
-    function closeQrModal() {
-      document.getElementById('qrModal').style.display = 'none';
-      if (qrPollInterval) clearInterval(qrPollInterval);
-    }
-
-    async function startQrFlow() {
-      document.getElementById('qr-spinner').style.display = 'block';
-      document.getElementById('qr-img').style.display = 'none';
-      document.getElementById('qr-status-msg').innerText = 'Requesting QR code from TikTok...';
-      document.getElementById('qr-status-msg').style.color = '#25f4ee';
-
-      if (qrPollInterval) clearInterval(qrPollInterval);
-
-      try {
-        const res = await fetch('/api/qr/start', { method: 'POST' });
-        const data = await res.json();
-        handleQrData(data);
-        qrPollInterval = setInterval(pollQrStatus, 2500);
-      } catch (e) {
-        document.getElementById('qr-status-msg').innerText = 'Failed to request QR: ' + e;
-        document.getElementById('qr-status-msg').style.color = '#fe2c55';
-      }
-    }
-
-    async function pollQrStatus() {
-      try {
-        const res = await fetch('/api/qr/status');
-        const data = await res.json();
-        handleQrData(data);
-      } catch (e) {
-        console.error('QR Poll error:', e);
-      }
-    }
-
-    function handleQrData(data) {
-      if (data.qr_image) {
-        document.getElementById('qr-spinner').style.display = 'none';
-        const img = document.getElementById('qr-img');
-        img.src = data.qr_image;
-        img.style.display = 'block';
-      }
-      if (data.status === 'waiting_for_scan') {
-        document.getElementById('qr-status-msg').innerText = 'Ready! Scan with TikTok App & tap Confirm.';
-        document.getElementById('qr-status-msg').style.color = '#25f4ee';
-      } else if (data.status === 'authenticated') {
-        document.getElementById('qr-status-msg').innerText = '🎉 Logged in successfully! TikTok Connected.';
-        document.getElementById('qr-status-msg').style.color = '#10b981';
-        if (qrPollInterval) clearInterval(qrPollInterval);
-        setTimeout(() => { closeQrModal(); fetchStats(); }, 2500);
-      } else if (data.status === 'expired') {
-        document.getElementById('qr-status-msg').innerText = '⚠️ QR Code expired. Click Refresh QR.';
-        document.getElementById('qr-status-msg').style.color = '#f59e0b';
-        if (qrPollInterval) clearInterval(qrPollInterval);
-      } else if (data.status === 'error') {
-        document.getElementById('qr-status-msg').innerText = '❌ Error: ' + (data.error || 'Failed');
-        document.getElementById('qr-status-msg').style.color = '#fe2c55';
-        if (qrPollInterval) clearInterval(qrPollInterval);
+        var hours = Math.floor(diff / (1000 * 60 * 60));
+        var mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+        var secs = Math.floor((diff % (1000 * 60)) / 1000);
+        var pad = function(n) { return n < 10 ? '0' + n : n; };
+        if (el) el.innerText = pad(hours) + ':' + pad(mins) + ':' + pad(secs);
       }
     }
 
     async function triggerManualPost() {
       if (!confirm("Are you sure you want to trigger an immediate post right now?")) return;
       try {
-        const res = await fetch('/api/trigger', { method: 'POST' });
-        const data = await res.json();
+        var res = await fetch('/api/trigger', { method: 'POST' });
+        var data = await res.json();
         alert(data.message || "Manual post triggered! Bot is processing queue.");
         fetchStats();
       } catch (e) {
