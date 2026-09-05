@@ -286,9 +286,35 @@ DASHBOARD_HTML = """
         <p id="current-status">Checking queue...</p>
         <span id="current-substatus" style="font-size: 13px; color: var(--text-muted);"></span>
       </div>
-      <button class="btn-trigger" onclick="triggerManualPost()">
-        <span>??</span> Post Next Reel Now
-      </button>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+        <button class="btn-trigger" style="background:#25f4ee; color:#07090e; box-shadow:0 4px 14px rgba(37,244,238,0.3);" onclick="openQrModal()">
+          <span>📱</span> Connect TikTok QR
+        </button>
+        <button class="btn-trigger" onclick="triggerManualPost()">
+          <span>🚀</span> Post Next Reel Now
+        </button>
+      </div>
+    </div>
+
+    <!-- TikTok QR Login Modal -->
+    <div id="qrModal" style="display:none; position:fixed; z-index:9999; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.85); backdrop-filter:blur(8px); justify-content:center; align-items:center;">
+      <div style="background:#121826; border:1px solid rgba(254,44,85,0.4); border-radius:18px; padding:28px; max-width:440px; width:90%; text-align:center; box-shadow:0 0 50px rgba(254,44,85,0.25);">
+        <h2 style="font-size:22px; font-weight:800; margin-bottom:8px; background:var(--accent-grad); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">📱 Connect TikTok Account</h2>
+        <p style="color:#9ca3af; font-size:13px; line-height:1.5; margin-bottom:18px;">
+          1. Open <b>TikTok App</b> on your mobile phone<br>
+          2. Tap <b>Profile ➔ ☰ Menu ➔ My QR Code ➔ 📷 Scan icon</b><br>
+          3. Point your camera at this QR code & tap <b>Confirm Login</b>
+        </p>
+        <div id="qr-container" style="background:#fff; border-radius:14px; padding:16px; margin:0 auto 16px; width:250px; height:250px; display:flex; align-items:center; justify-content:center;">
+          <div id="qr-spinner" style="color:#121826; font-weight:600; font-size:14px;">Loading QR code from TikTok...</div>
+          <img id="qr-img" src="" style="display:none; width:100%; height:100%; object-fit:contain; border-radius:8px;" />
+        </div>
+        <div id="qr-status-msg" style="font-size:14px; font-weight:600; color:#25f4ee; margin-bottom:20px;">Requesting session from TikTok...</div>
+        <div style="display:flex; justify-content:center; gap:12px;">
+          <button onclick="startQrFlow()" style="background:#1f2937; color:#fff; border:1px solid rgba(255,255,255,0.1); padding:10px 18px; border-radius:10px; font-weight:600; cursor:pointer;">🔄 Refresh QR</button>
+          <button onclick="closeQrModal()" style="background:transparent; border:1px solid #4b5563; color:#9ca3af; padding:10px 18px; border-radius:10px; cursor:pointer;">Close</button>
+        </div>
+      </div>
     </div>
 
     <div class="grid-stats">
@@ -399,6 +425,73 @@ DASHBOARD_HTML = """
       }
     }
 
+    let qrPollInterval = null;
+
+    async function openQrModal() {
+      document.getElementById('qrModal').style.display = 'flex';
+      startQrFlow();
+    }
+
+    function closeQrModal() {
+      document.getElementById('qrModal').style.display = 'none';
+      if (qrPollInterval) clearInterval(qrPollInterval);
+    }
+
+    async function startQrFlow() {
+      document.getElementById('qr-spinner').style.display = 'block';
+      document.getElementById('qr-img').style.display = 'none';
+      document.getElementById('qr-status-msg').innerText = 'Requesting QR code from TikTok...';
+      document.getElementById('qr-status-msg').style.color = '#25f4ee';
+
+      if (qrPollInterval) clearInterval(qrPollInterval);
+
+      try {
+        const res = await fetch('/api/qr/start', { method: 'POST' });
+        const data = await res.json();
+        handleQrData(data);
+        qrPollInterval = setInterval(pollQrStatus, 2500);
+      } catch (e) {
+        document.getElementById('qr-status-msg').innerText = 'Failed to request QR: ' + e;
+        document.getElementById('qr-status-msg').style.color = '#fe2c55';
+      }
+    }
+
+    async function pollQrStatus() {
+      try {
+        const res = await fetch('/api/qr/status');
+        const data = await res.json();
+        handleQrData(data);
+      } catch (e) {
+        console.error('QR Poll error:', e);
+      }
+    }
+
+    function handleQrData(data) {
+      if (data.qr_image) {
+        document.getElementById('qr-spinner').style.display = 'none';
+        const img = document.getElementById('qr-img');
+        img.src = data.qr_image;
+        img.style.display = 'block';
+      }
+      if (data.status === 'waiting_for_scan') {
+        document.getElementById('qr-status-msg').innerText = 'Ready! Scan with TikTok App & tap Confirm.';
+        document.getElementById('qr-status-msg').style.color = '#25f4ee';
+      } else if (data.status === 'authenticated') {
+        document.getElementById('qr-status-msg').innerText = '🎉 Logged in successfully! TikTok Connected.';
+        document.getElementById('qr-status-msg').style.color = '#10b981';
+        if (qrPollInterval) clearInterval(qrPollInterval);
+        setTimeout(() => { closeQrModal(); fetchStats(); }, 2500);
+      } else if (data.status === 'expired') {
+        document.getElementById('qr-status-msg').innerText = '⚠️ QR Code expired. Click Refresh QR.';
+        document.getElementById('qr-status-msg').style.color = '#f59e0b';
+        if (qrPollInterval) clearInterval(qrPollInterval);
+      } else if (data.status === 'error') {
+        document.getElementById('qr-status-msg').innerText = '❌ Error: ' + (data.error || 'Failed');
+        document.getElementById('qr-status-msg').style.color = '#fe2c55';
+        if (qrPollInterval) clearInterval(qrPollInterval);
+      }
+    }
+
     async function triggerManualPost() {
       if (!confirm("Are you sure you want to trigger an immediate post right now?")) return;
       try {
@@ -473,11 +566,24 @@ def trigger():
 
 @app.route("/api/screenshot")
 def screenshot():
-    for fname in ["tiktok_published_verified.png", "tiktok_post_result.png", "tiktok_upload_err.png", "tiktok_error.png"]:
+    for fname in ["tiktok_published_verified.png", "tiktok_post_result.png", "tiktok_upload_err.png", "tiktok_error.png", "login_qr.png"]:
         p = config.TEMP_DIR / fname
         if p.exists():
             return send_file(str(p), mimetype="image/png")
     return jsonify({"error": "No screenshot available"}), 404
+
+@app.route("/api/qr/start", methods=["POST", "GET"])
+def qr_start():
+    from qr_login import TikTokQRLoginManager
+    manager = TikTokQRLoginManager()
+    res = manager.start_login_session()
+    return jsonify(res)
+
+@app.route("/api/qr/status")
+def qr_status():
+    from qr_login import TikTokQRLoginManager
+    manager = TikTokQRLoginManager()
+    return jsonify(manager.get_status())
 
 def run_web_server():
     port = int(os.getenv("PORT", "8080"))

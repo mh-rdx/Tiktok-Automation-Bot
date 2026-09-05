@@ -55,12 +55,21 @@ class TikTokUploader:
                     "--window-size=1920,1080"
                 ]
             )
-            context = browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                locale="en-US",
-                timezone_id="America/New_York"
-            )
+            session_file = config.BASE_DIR / "tiktok_session.json"
+            ctx_params = {
+                "viewport": {"width": 1920, "height": 1080},
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "locale": "en-US",
+                "timezone_id": "America/New_York"
+            }
+            if session_file.exists():
+                try:
+                    ctx_params["storage_state"] = str(session_file)
+                    logger.info("Using saved authenticated browser storage state from tiktok_session.json")
+                except Exception as se:
+                    logger.warning(f"Could not load storage_state: {se}")
+
+            context = browser.new_context(**ctx_params)
 
             # Anti-bot detection mitigation script
             context.add_init_script("""
@@ -153,6 +162,12 @@ class TikTokUploader:
                     raise TikTokUploadError(
                         f"TikTok session rejected. Redirected to login: {current_url}. Please refresh your session cookies."
                     )
+
+                # Save refreshed session state
+                try:
+                    context.storage_state(path=str(session_file))
+                except Exception:
+                    pass
 
                 # Fallback check for + Upload button if not directly on upload dropzone
                 file_input = page.locator('input[type="file"]').first
