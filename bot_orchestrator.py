@@ -19,7 +19,7 @@ import threading
 import config
 from drive_service import DriveService
 from video_processor import VideoProcessor
-from tiktok_uploader import TikTokUploader
+from tiktok_uploader import TikTokUploader, TikTokUploadError, TikTokContentRestrictedError
 from web_dashboard import bot_state, run_web_server
 
 try:
@@ -225,6 +225,20 @@ class BotOrchestrator:
                 bot_state["sub_status"] = "TikTok did not confirm publish"
                 return False
 
+        except TikTokContentRestrictedError as rest_err:
+            logger.warning("=" * 65)
+            logger.warning(f"⚠️ VIDEO RESTRICTED BY TIKTOK: '{file_name}'")
+            logger.warning(f"Reason: {rest_err}")
+            logger.warning(f"Action: Deleting '{file_name}' from Google Drive to protect TikTok account health...")
+            logger.warning("=" * 65)
+            bot_state["status"] = "Video Restricted (Skipped)"
+            bot_state["sub_status"] = f"Deleted restricted '{file_name}' from Drive"
+
+            # Delete the restricted video from Google Drive so it is never reprocessed
+            self.drive.delete_video(file_id)
+            self.last_job_restricted = True
+            return False
+
         except Exception as e:
             logger.error(f"Exception during processing of '{file_name}' (ID: {file_id}): {e}", exc_info=True)
             bot_state["status"] = "Error"
@@ -291,6 +305,12 @@ class BotOrchestrator:
                     bot_state["next_post_time"] = target_time
                     logger.info(f"Waiting {interval // 60} minutes before next scheduled post...")
                     self._interruptible_sleep(interval)
+                elif getattr(self, "last_job_restricted", False):
+                    self.last_job_restricted = False
+                    logger.info("Restricted reel removed from Drive. Picking up next reel from queue in 30 seconds...")
+                    bot_state["status"] = "Restricted Reel Deleted"
+                    bot_state["sub_status"] = "Picking up next reel in 30s..."
+                    self._interruptible_sleep(30)
                 else:
                     # On single failure, back off briefly (5 min) and keep daemon alive
                     logger.warning("Job failed. Waiting 5 minutes before retrying queue...")
