@@ -464,7 +464,6 @@ class TikTokAuthManager:
 
         cookies_json = json.dumps(pw_cookies)
         setattr(config, "TIKTOK_COOKIES_JSON", cookies_json)
-        self._sync_to_railway(cookies_json)
 
         with self.state_lock:
             self.status = "authenticated"
@@ -497,8 +496,6 @@ class TikTokAuthManager:
             self.error_message = None
             self.info_message = "TikTok account connected successfully!"
 
-        self._sync_to_railway(cookies_json)
-
     def _apply_stealth(self, context: BrowserContext):
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -507,40 +504,6 @@ class TikTokAuthManager:
             Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
             window.chrome = { runtime: {} };
         """)
-
-    def _sync_to_railway(self, cookies_json: str):
-        """Attempts to update TIKTOK_COOKIES_JSON on Railway."""
-        token = os.getenv("RAILWAY_TOKEN", "b54e69bd-7e2c-4412-840f-ccd24f2893bb")
-        project_id = os.getenv("RAILWAY_PROJECT_ID", "31fb51f1-7b77-4c3a-9e66-4e9c788a7d67")
-        env_id = os.getenv("RAILWAY_ENVIRONMENT_ID", "8d2b0b13-a952-47e0-8e22-6cc917d20652")
-        service_id = os.getenv("RAILWAY_SERVICE_ID", "ce456392-5f96-4328-b3a5-c408d4dc74c4")
-
-        if not token or not service_id:
-            return
-
-        query = """
-        mutation VariableUpsert($input: VariableUpsertInput!) {
-            variableUpsert(input: $input)
-        }
-        """
-        variables = {
-            "input": {
-                "projectId": project_id,
-                "environmentId": env_id,
-                "serviceId": service_id,
-                "name": "TIKTOK_COOKIES_JSON",
-                "value": cookies_json
-            }
-        }
-        try:
-            requests.post(
-                "https://backboard.railway.app/graphql/v2",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"query": query, "variables": variables},
-                timeout=8
-            )
-        except Exception:
-            pass
 
 
 # For backwards compatibility with any existing qr_login references

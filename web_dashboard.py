@@ -345,7 +345,7 @@ DASHBOARD_HTML = """
     </div>
 
     <footer>
-      <p>TIME PASS &bull; TikTok Cloud Bot Daemon &bull; Running on Railway.app</p>
+      <p>TIME PASS &bull; TikTok Cloud Bot Daemon &bull; Running Standalone</p>
     </footer>
   </div>
 
@@ -1182,7 +1182,7 @@ def session_upload():
         raw_str = json.dumps(data)
         manager.save_and_verify_cookies(raw_str)
 
-        return jsonify({"success": True, "message": "Session received and verified successfully on Railway!"})
+        return jsonify({"success": True, "message": "Session received and verified successfully!"})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 

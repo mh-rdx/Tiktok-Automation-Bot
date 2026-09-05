@@ -1,43 +1,36 @@
 """
-1-Click Local TikTok Session Exporter & Server Synchronizer.
-Run this script locally on your PC to instantly connect your TikTok account to Railway!
-Supports Google Login, Phone, Email, Facebook, or existing browser session.
+1-Click TikTok Session Exporter & Browser Login Tool.
+Launches a visible Chromium window on your desktop.
+Logs in via QR Code, Google, Email, or Phone.
+Saves the authenticated session directly into tiktok_session.json.
 """
 
 import os
 import sys
 import time
 import json
+import threading
 from pathlib import Path
-import requests
 
 BASE_DIR = Path(__file__).resolve().parent
 SESSION_FILE = BASE_DIR / "tiktok_session.json"
-DEFAULT_SERVER_URL = "https://worker-production-4386.up.railway.app"
-
-SERVER_URL = os.getenv("SERVER_URL", DEFAULT_SERVER_URL).rstrip("/")
 
 
-def upload_session_to_server(session_data: dict) -> bool:
-    print(f"\n📡 Uploading TikTok session to Railway server ({SERVER_URL})...")
-    upload_url = f"{SERVER_URL}/api/session/upload"
-    try:
-        resp = requests.post(upload_url, json=session_data, timeout=30)
-        if resp.status_code == 200 and resp.json().get("success"):
-            print("=" * 60)
-            print("🎉 SUCCESS! TikTok account connected to your 24/7 bot on Railway!")
-            print(f"Server response: {resp.json().get('message')}")
-            print("=" * 60)
-            return True
-        else:
-            print(f"❌ Server rejected session: {resp.text}")
-            return False
-    except Exception as e:
-        print(f"❌ Connection error to {SERVER_URL}: {e}")
-        return False
+def normalize_samesite(val):
+    v = str(val or "").strip().lower()
+    if v == "strict":
+        return "Strict"
+    if v == "lax":
+        return "Lax"
+    return "None"
 
 
-def export_via_browser():
+def main():
+    print("=" * 65)
+    print("      TIME PASS | TikTok 1-Click Login & Session Saver")
+    print("=" * 65)
+    print()
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -46,76 +39,106 @@ def export_via_browser():
         os.system(f"{sys.executable} -m playwright install chromium")
         from playwright.sync_api import sync_playwright
 
-    print("\n🚀 Launching local browser on your PC...")
-    print("👉 If you are not already logged in, please log in using ANY method:")
-    print("   (Continue with Google, QR Code, Email, Phone, etc.)")
-    print("👉 Once logged in to TikTok Studio, this script will automatically capture your session!\n")
+    print("🚀 Launching visible browser window on your desktop...")
+    print("👉 When the browser opens, log in to your TikTok account:")
+    print("   - Scan QR code using your mobile TikTok app (FASTEST & EASIEST!)")
+    print("   - Or use 'Continue with Google'")
+    print("   - Or use 'Use phone / email / username'")
+    print()
+    print("👉 Once you are logged in to TikTok Studio, press [ENTER] here in this terminal.")
+    print("=" * 65)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        browser = p.chromium.launch(
+            headless=False,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--window-size=1280,900"
+            ]
         )
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            locale="en-US"
+        )
+        # Anti-bot detection stealth
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            window.chrome = { runtime: {} };
+        """)
+
         page = context.new_page()
-        page.goto("https://www.tiktok.com/tiktokstudio", wait_until="domcontentloaded")
+        login_url = "https://www.tiktok.com/tiktokstudio"
+        print(f"\n🌐 Opening {login_url}...")
+        try:
+            page.goto(login_url, wait_until="domcontentloaded")
+        except Exception as ge:
+            print(f"Notice during navigation: {ge}")
 
-        print("⏳ Waiting for TikTok login (waiting up to 180 seconds)...")
-        start = time.time()
-        authenticated = False
+        print("\n⏳ Browser is now open! Please log in...")
+        print("💡 When you see your TikTok Studio or Profile, press [ENTER] below to save session:\n")
 
-        while time.time() - start < 180:
+        user_pressed_enter = threading.Event()
+
+        def wait_for_enter():
+            try:
+                input("👉 Press [ENTER] when you are logged in: ")
+                user_pressed_enter.set()
+            except Exception:
+                pass
+
+        input_thread = threading.Thread(target=wait_for_enter, daemon=True)
+        input_thread.start()
+
+        start_time = time.time()
+
+        while not user_pressed_enter.is_set():
             time.sleep(2)
-            cur_url = page.url.lower()
-            # If in studio and not on login page
-            if "tiktokstudio" in cur_url and "login" not in cur_url:
-                # Check for profile or upload container
-                try:
-                    page.wait_for_timeout(2000)
-                    authenticated = True
-                    break
-                except Exception:
-                    pass
+            # Check if auto-detected
+            try:
+                cookies = context.cookies()
+                cookie_names = [c["name"] for c in cookies]
+                if "sessionid" in cookie_names and ("sid_tt" in cookie_names or "uid_tt" in cookie_names):
+                    cur_url = page.url.lower()
+                    if "login" not in cur_url and "tiktokstudio" in cur_url:
+                        print("\n🎉 Auto-detected active sessionid and TikTok login!")
+                        break
+            except Exception:
+                pass
 
-        if not authenticated:
-            print("❌ Login timed out. Please run the script again and complete login.")
-            browser.close()
-            return False
+            # Timeout after 5 minutes if no response
+            if time.time() - start_time > 300:
+                print("\n⏰ 5 minutes elapsed.")
+                break
 
-        print("\n✅ Detected active TikTok Studio login!")
+        print("\n📦 Capturing full session cookies and storage state...")
+        time.sleep(2)
+
         # Export storage state
         context.storage_state(path=str(SESSION_FILE))
-        print(f"💾 Saved local session to: {SESSION_FILE}")
 
-        with open(SESSION_FILE, "r", encoding="utf-8") as f:
-            session_data = json.load(f)
-
-        browser.close()
-        return upload_session_to_server(session_data)
-
-
-def main():
-    print("=" * 65)
-    print("  TIME PASS | TikTok 1-Click Railway Synchronizer")
-    print("=" * 65)
-    print(f"Target Server: {SERVER_URL}")
-
-    # Check if local session file already exists
-    if SESSION_FILE.exists():
-        print(f"\n📁 Found existing local session file: {SESSION_FILE}")
+        # Normalize sameSite in saved session file
         try:
             with open(SESSION_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if "cookies" in data and len(data["cookies"]) > 0:
-                print(f"📦 Loaded {len(data['cookies'])} cookies from existing session.")
-                success = upload_session_to_server(data)
-                if success:
-                    return
-                print("⚠️ Existing session was invalid or expired. Opening browser to refresh...")
+                s_data = json.load(f)
+            pw_cookies = s_data.get("cookies", [])
+            for c in pw_cookies:
+                c["sameSite"] = normalize_samesite(c.get("sameSite"))
+            with open(SESSION_FILE, "w", encoding="utf-8") as f:
+                json.dump(s_data, f, indent=2)
+            print(f"✅ Successfully saved {len(pw_cookies)} cookies to {SESSION_FILE.name}!")
         except Exception as e:
-            print(f"Could not load existing file: {e}")
+            print(f"⚠️ Note on saving: {e}")
 
-    export_via_browser()
+        browser.close()
+
+    print("\n" + "=" * 65)
+    print("🎉 ALL DONE! Your TikTok session is ready on this machine.")
+    print("🚀 You can now double-click 'run_bot.bat' to start the 24/7 bot!")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
