@@ -28,5 +28,8 @@ COPY . .
 # Ensure temp directory exists
 RUN mkdir -p temp
 
-# Run the 24/7 background orchestrator daemon
+# Expose web dashboard port
+EXPOSE 8080
+
+# Run the 24/7 background orchestrator daemon with live web dashboard
 CMD ["python", "bot_orchestrator.py"]

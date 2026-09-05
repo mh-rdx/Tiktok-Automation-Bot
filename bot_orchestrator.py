@@ -13,10 +13,14 @@ import logging
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
+import os
+import threading
+
 import config
 from drive_service import DriveService
 from video_processor import VideoProcessor
 from tiktok_uploader import TikTokUploader
+from web_dashboard import bot_state, run_web_server
 
 try:
     if hasattr(sys.stdout, "reconfigure"):
@@ -107,12 +111,23 @@ class BotOrchestrator:
         self.processor = VideoProcessor()
         self.uploader = TikTokUploader()
 
+        # Start live Web Dashboard in background thread
+        self.web_thread = threading.Thread(target=run_web_server, daemon=True)
+        self.web_thread.start()
+        port = os.getenv("PORT", "8080")
+        logger.info(f"Live Web Dashboard started on port {port} (http://0.0.0.0:{port})")
+
+        # Initialize dashboard telemetry
+        bot_state["posts_today"] = self.state_mgr.posts_today
+        bot_state["daily_limit"] = config.DAILY_LIMIT
+
         # Handle graceful shutdown on Ctrl+C and kill signals
         signal.signal(signal.SIGINT, self._handle_exit)
         signal.signal(signal.SIGTERM, self._handle_exit)
 
     def _handle_exit(self, signum, frame):
         logger.info("Shutdown signal received. Completing active work and shutting down cleanly...")
+        bot_state["status"] = "Shutting down..."
         self.is_running = False
 
     def calculate_sleep_seconds(self) -> int:
@@ -142,15 +157,23 @@ class BotOrchestrator:
             f"Pausing orchestrator until tomorrow ({target_midnight.strftime('%Y-%m-%d %H:%M:%S')}) - "
             f"{seconds_to_wait // 3600} hours remaining."
         )
+        bot_state["status"] = "Daily Cap Reached (10/10)"
+        bot_state["sub_status"] = f"Resumes tomorrow at {target_midnight.strftime('%I:%M %p')}"
+        bot_state["next_post_time"] = target_midnight
         self._interruptible_sleep(seconds_to_wait)
 
     def _interruptible_sleep(self, seconds: int) -> None:
         """
-        Sleeps in 5-second increments so the process exits promptly if interrupted.
+        Sleeps in 2-second increments so the process exits promptly if interrupted
+        or immediately resumes if manual trigger is clicked on the web dashboard.
         """
         slept = 0
-        step = 5
+        step = 2
         while self.is_running and slept < seconds:
+            if bot_state.get("manual_trigger_requested"):
+                logger.info("Manual post trigger detected from Web Dashboard! Resuming queue work immediately...")
+                bot_state["manual_trigger_requested"] = False
+                break
             time.sleep(min(step, seconds - slept))
             slept += step
 
@@ -169,29 +192,43 @@ class BotOrchestrator:
 
         try:
             logger.info(f"========== Processing Pipeline Initiated: '{file_name}' ==========")
+            bot_state["status"] = f"Processing: {file_name}"
+            bot_state["sub_status"] = "Downloading raw reel from Google Drive..."
 
             # 1. Download raw reel from Google Drive (using target download_id)
             self.drive.download_video(download_id, raw_path)
 
             # 2. Apply scaled watermark and re-encode
+            bot_state["sub_status"] = "Watermarking with TIME PASS logo..."
             self.processor.apply_watermark(raw_path, processed_path)
 
             # 3. Direct chunk upload to TikTok and poll status
+            bot_state["sub_status"] = "Uploading to TikTok Studio via Playwright..."
             logger.info(f"Publishing watermarked reel to TikTok...")
             upload_confirmed = self.uploader.upload_video(processed_path)
 
             if upload_confirmed:
                 logger.info(f"Publish verified! Safe to delete source file from Google Drive.")
+                bot_state["status"] = "Reel Published Successfully!"
+                bot_state["sub_status"] = f"Published: {file_name}"
+                bot_state["last_post_name"] = file_name
+                bot_state["last_post_time"] = datetime.now()
                 # 4. Remove original from Google Drive to avoid duplicate reprocessing
                 self.drive.delete_video(file_id)
                 self.state_mgr.record_successful_post()
+                bot_state["posts_today"] = self.state_mgr.posts_today
+                bot_state["total_posts"] = bot_state.get("total_posts", 0) + 1
                 return True
             else:
                 logger.error(f"Upload was not confirmed by TikTok for '{file_name}'. Retaining Drive file.")
+                bot_state["status"] = "Publish Failed"
+                bot_state["sub_status"] = "TikTok did not confirm publish"
                 return False
 
         except Exception as e:
             logger.error(f"Exception during processing of '{file_name}' (ID: {file_id}): {e}", exc_info=True)
+            bot_state["status"] = "Error"
+            bot_state["sub_status"] = str(e)[:60]
             return False
 
         finally:
@@ -218,9 +255,13 @@ class BotOrchestrator:
         while self.is_running:
             try:
                 # Check daily rate limit
+                bot_state["posts_today"] = self.state_mgr.posts_today
                 if self.state_mgr.posts_today >= config.DAILY_LIMIT:
                     self.sleep_until_midnight()
                     continue
+
+                bot_state["status"] = "Checking Google Drive Queue..."
+                bot_state["sub_status"] = "Searching for pending reels"
 
                 # Query Google Drive for the oldest reel (FIFO)
                 video_file = self.drive.get_oldest_video()
@@ -230,8 +271,13 @@ class BotOrchestrator:
                         f"No pending reels found in Google Drive. "
                         f"Re-checking in {config.EMPTY_QUEUE_SLEEP_SECONDS // 60} minutes..."
                     )
+                    bot_state["status"] = "Queue Empty (Waiting for Reels)"
+                    bot_state["sub_status"] = f"Re-checking Drive in {config.EMPTY_QUEUE_SLEEP_SECONDS // 60}m"
+                    bot_state["drive_queue_count"] = 0
                     self._interruptible_sleep(config.EMPTY_QUEUE_SLEEP_SECONDS)
                     continue
+
+                bot_state["drive_queue_count"] = "1+"
 
                 # Process the reel through the pipeline
                 success = self.process_single_video(video_file)
@@ -239,15 +285,23 @@ class BotOrchestrator:
                 if success:
                     # Normal pacing delay with anti-detection jitter
                     interval = self.calculate_sleep_seconds()
+                    target_time = datetime.now() + timedelta(seconds=interval)
+                    bot_state["status"] = "Scheduled Interval Wait"
+                    bot_state["sub_status"] = f"Next post at {target_time.strftime('%I:%M %p')}"
+                    bot_state["next_post_time"] = target_time
                     logger.info(f"Waiting {interval // 60} minutes before next scheduled post...")
                     self._interruptible_sleep(interval)
                 else:
                     # On single failure, back off briefly (5 min) and keep daemon alive
                     logger.warning("Job failed. Waiting 5 minutes before retrying queue...")
+                    bot_state["status"] = "Temporary Backoff (5m)"
+                    bot_state["sub_status"] = "Retrying Drive queue shortly"
                     self._interruptible_sleep(300)
 
             except Exception as loop_err:
                 logger.critical(f"Unexpected error in daemon main loop: {loop_err}", exc_info=True)
+                bot_state["status"] = "Exception Encountered"
+                bot_state["sub_status"] = "Recovering in 60s..."
                 self._interruptible_sleep(60)
 
         logger.info("TikTok Automation Daemon stopped.")
