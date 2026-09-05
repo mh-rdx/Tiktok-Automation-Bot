@@ -1,6 +1,14 @@
 """
 Live Web Dashboard & REST Monitoring API.
 Serves a modern glassmorphic dashboard on $PORT (default: 8080) for Railway.
+Features:
+- Live Bot Status & Uptime Monitoring
+- Interactive Multi-Method TikTok Login Portal (/login):
+  1. Username / Email + Password (with live 2FA verification code input)
+  2. 1-Click Local PC Browser Sync (Google, Apple, or active browser session)
+  3. Direct Cookie / Session ID String Paste
+  4. Live TikTok QR Code Scanner
+- Downloadable Local Sync scripts for Windows (.bat & .py)
 """
 
 import os
@@ -10,7 +18,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from flask import Flask, jsonify, render_template_string, send_file, request
+from flask import Flask, jsonify, render_template_string, send_file, request, redirect
 
 import config
 
@@ -161,14 +169,15 @@ DASHBOARD_HTML = """
       border: none;
       padding: 12px 22px;
       border-radius: 12px;
-      font-weight: 700;
       font-size: 14px;
+      font-weight: 700;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
       gap: 8px;
       transition: all 0.2s ease;
       box-shadow: 0 4px 14px rgba(254, 44, 85, 0.4);
+      text-decoration: none;
     }
     .btn-trigger:hover {
       transform: translateY(-2px);
@@ -176,21 +185,18 @@ DASHBOARD_HTML = """
     }
     .grid-stats {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 18px;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
       margin-bottom: 24px;
     }
     .card {
       background: var(--card-bg);
-      backdrop-filter: blur(12px);
+      backdrop-filter: blur(10px);
       border: 1px solid var(--card-border);
-      border-radius: 18px;
+      border-radius: 16px;
       padding: 20px;
-      transition: transform 0.2s ease;
-    }
-    .card:hover {
-      transform: translateY(-2px);
-      border-color: rgba(255, 255, 255, 0.15);
+      position: relative;
+      overflow: hidden;
     }
     .card-label {
       font-size: 13px;
@@ -202,64 +208,64 @@ DASHBOARD_HTML = """
       font-size: 28px;
       font-weight: 800;
       letter-spacing: -0.5px;
-      margin-bottom: 4px;
+      color: #fff;
     }
     .card-sub {
       font-size: 12px;
       color: var(--text-muted);
+      margin-top: 6px;
     }
     .progress-bar-bg {
       background: rgba(255, 255, 255, 0.08);
-      border-radius: 9999px;
-      height: 8px;
-      overflow: hidden;
+      border-radius: 99px;
+      height: 6px;
+      width: 100%;
       margin-top: 12px;
+      overflow: hidden;
     }
     .progress-bar-fill {
       background: var(--accent-grad);
       height: 100%;
-      border-radius: 9999px;
-      transition: width 0.5s ease;
+      width: 0%;
+      border-radius: 99px;
+      transition: width 0.4s ease;
     }
     .logs-panel {
-      background: #030508;
+      background: var(--card-bg);
+      backdrop-filter: blur(12px);
       border: 1px solid var(--card-border);
-      border-radius: 18px;
+      border-radius: 16px;
       padding: 20px;
-      font-family: 'JetBrains Mono', monospace;
     }
     .logs-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 12px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-      padding-bottom: 10px;
+      margin-bottom: 14px;
     }
     .logs-header h3 {
-      font-size: 14px;
-      color: var(--text-muted);
-      font-family: 'Outfit', sans-serif;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
     }
     .logs-content {
+      background: rgba(7, 9, 14, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 10px;
+      padding: 14px;
+      font-family: 'JetBrains Mono', monospace;
       font-size: 12px;
       line-height: 1.6;
-      max-height: 280px;
+      color: #d1d5db;
+      height: 280px;
       overflow-y: auto;
-      color: #cbd5e1;
       white-space: pre-wrap;
-      word-break: break-word;
+      word-break: break-all;
     }
-    .log-line {
-      margin-bottom: 4px;
-    }
-    .log-info { color: #60a5fa; }
-    .log-warn { color: #fbbf24; }
-    .log-err { color: #f87171; }
     footer {
       text-align: center;
-      margin-top: 36px;
-      font-size: 13px;
+      margin-top: 32px;
+      font-size: 12px;
       color: var(--text-muted);
     }
   </style>
@@ -274,9 +280,14 @@ DASHBOARD_HTML = """
           <p>Autonomous TikTok 24/7 Cloud Engine</p>
         </div>
       </div>
-      <div class="live-badge">
-        <span class="pulse-dot"></span>
-        <span id="daemon-badge">DAEMON ONLINE</span>
+      <div style="display:flex; align-items:center; gap:12px;">
+        <span id="account-badge" style="font-size:12px; font-weight:700; padding:6px 14px; border-radius:999px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15);">
+          Checking TikTok...
+        </span>
+        <div class="live-badge">
+          <span class="pulse-dot"></span>
+          <span id="daemon-badge">DAEMON ONLINE</span>
+        </div>
       </div>
     </header>
 
@@ -287,33 +298,12 @@ DASHBOARD_HTML = """
         <span id="current-substatus" style="font-size: 13px; color: var(--text-muted);"></span>
       </div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-        <a href="/qr" class="btn-trigger" style="background:#25f4ee; color:#07090e; box-shadow:0 4px 14px rgba(37,244,238,0.3); text-decoration:none;">
-          <span>📱</span> Connect TikTok QR
+        <a href="/login" class="btn-trigger" style="background:#25f4ee; color:#07090e; box-shadow:0 4px 14px rgba(37,244,238,0.3); text-decoration:none;">
+          <span>🔑</span> Connect TikTok Account
         </a>
         <button class="btn-trigger" onclick="triggerManualPost()">
           <span>🚀</span> Post Next Reel Now
         </button>
-      </div>
-    </div>
-
-    <!-- TikTok QR Login Modal -->
-    <div id="qrModal" style="display:none; position:fixed; z-index:9999; left:0; top:0; width:100%; height:100%; background:rgba(0,0,0,0.85); backdrop-filter:blur(8px); justify-content:center; align-items:center;">
-      <div style="background:#121826; border:1px solid rgba(254,44,85,0.4); border-radius:18px; padding:28px; max-width:440px; width:90%; text-align:center; box-shadow:0 0 50px rgba(254,44,85,0.25);">
-        <h2 style="font-size:22px; font-weight:800; margin-bottom:8px; background:var(--accent-grad); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">📱 Connect TikTok Account</h2>
-        <p style="color:#9ca3af; font-size:13px; line-height:1.5; margin-bottom:18px;">
-          1. Open <b>TikTok App</b> on your mobile phone<br>
-          2. Tap <b>Profile ➔ ☰ Menu ➔ My QR Code ➔ 📷 Scan icon</b><br>
-          3. Point your camera at this QR code & tap <b>Confirm Login</b>
-        </p>
-        <div id="qr-container" style="background:#fff; border-radius:14px; padding:16px; margin:0 auto 16px; width:250px; height:250px; display:flex; align-items:center; justify-content:center;">
-          <div id="qr-spinner" style="color:#121826; font-weight:600; font-size:14px;">Loading QR code from TikTok...</div>
-          <img id="qr-img" src="" style="display:none; width:100%; height:100%; object-fit:contain; border-radius:8px;" />
-        </div>
-        <div id="qr-status-msg" style="font-size:14px; font-weight:600; color:#25f4ee; margin-bottom:20px;">Requesting session from TikTok...</div>
-        <div style="display:flex; justify-content:center; gap:12px;">
-          <button onclick="startQrFlow()" style="background:#1f2937; color:#fff; border:1px solid rgba(255,255,255,0.1); padding:10px 18px; border-radius:10px; font-weight:600; cursor:pointer;">🔄 Refresh QR</button>
-          <button onclick="closeQrModal()" style="background:transparent; border:1px solid #4b5563; color:#9ca3af; padding:10px 18px; border-radius:10px; cursor:pointer;">Close</button>
-        </div>
       </div>
     </div>
 
@@ -362,140 +352,64 @@ DASHBOARD_HTML = """
   <script>
     let countdownInterval = null;
     let nextPostTimestamp = null;
-    let qrPollInterval = null;
-
-    function openQrModal() {
-      var modal = document.getElementById('qrModal');
-      if (modal) modal.style.display = 'flex';
-      startQrFlow();
-    }
-
-    function closeQrModal() {
-      var modal = document.getElementById('qrModal');
-      if (modal) modal.style.display = 'none';
-      if (qrPollInterval) clearInterval(qrPollInterval);
-    }
-
-    async function startQrFlow() {
-      var spinner = document.getElementById('qr-spinner');
-      var img = document.getElementById('qr-img');
-      var statusMsg = document.getElementById('qr-status-msg');
-
-      if (spinner) spinner.style.display = 'block';
-      if (img) img.style.display = 'none';
-      if (statusMsg) {
-        statusMsg.innerText = 'Requesting QR code from TikTok...';
-        statusMsg.style.color = '#25f4ee';
-      }
-
-      if (qrPollInterval) clearInterval(qrPollInterval);
-
-      try {
-        var res = await fetch('/api/qr/start', { method: 'POST' });
-        var data = await res.json();
-        handleQrData(data);
-        qrPollInterval = setInterval(pollQrStatus, 2500);
-      } catch (e) {
-        if (statusMsg) {
-          statusMsg.innerText = 'Failed to request QR: ' + e;
-          statusMsg.style.color = '#fe2c55';
-        }
-      }
-    }
-
-    async function pollQrStatus() {
-      try {
-        var res = await fetch('/api/qr/status');
-        var data = await res.json();
-        handleQrData(data);
-      } catch (e) {
-        console.error('QR Poll error:', e);
-      }
-    }
-
-    function handleQrData(data) {
-      var spinner = document.getElementById('qr-spinner');
-      var img = document.getElementById('qr-img');
-      var statusMsg = document.getElementById('qr-status-msg');
-
-      if (data.qr_image && img) {
-        if (spinner) spinner.style.display = 'none';
-        img.src = data.qr_image;
-        img.style.display = 'block';
-      }
-      if (!statusMsg) return;
-
-      if (data.status === 'waiting_for_scan') {
-        statusMsg.innerText = 'Ready! Scan with TikTok App & tap Confirm.';
-        statusMsg.style.color = '#25f4ee';
-      } else if (data.status === 'authenticated') {
-        statusMsg.innerText = '🎉 Logged in successfully! TikTok Connected.';
-        statusMsg.style.color = '#10b981';
-        if (qrPollInterval) clearInterval(qrPollInterval);
-        setTimeout(function() { closeQrModal(); fetchStats(); }, 2500);
-      } else if (data.status === 'expired') {
-        statusMsg.innerText = '⚠️ QR Code expired. Click Refresh QR.';
-        statusMsg.style.color = '#f59e0b';
-        if (qrPollInterval) clearInterval(qrPollInterval);
-      } else if (data.status === 'error') {
-        statusMsg.innerText = '❌ Error: ' + (data.error || 'Failed');
-        statusMsg.style.color = '#fe2c55';
-        if (qrPollInterval) clearInterval(qrPollInterval);
-      }
-    }
 
     async function fetchStats() {
       try {
         var res = await fetch('/api/status');
-        if (!res.ok) return;
         var data = await res.json();
 
         document.getElementById('current-status').innerText = data.status || 'Active';
         document.getElementById('current-substatus').innerText = data.sub_status || '';
-        document.getElementById('posts-today').innerText = data.posts_today + ' / ' + data.daily_limit;
-        
-        var pct = Math.min(100, (data.posts_today / data.daily_limit) * 100);
-        document.getElementById('daily-bar').style.width = pct + '%';
-
-        document.getElementById('drive-queue').innerText = data.drive_queue_count + ' reels';
         document.getElementById('uptime').innerText = data.uptime_str || '0m';
+        document.getElementById('drive-queue').innerText = data.drive_queue_count + ' reels';
 
-        nextPostTimestamp = data.next_post_time;
-        if (data.next_post_str) {
-          document.getElementById('next-post-time').innerText = 'Scheduled: ' + data.next_post_str;
+        var today = data.posts_today || 0;
+        var limit = data.daily_limit || 10;
+        document.getElementById('posts-today').innerText = today + ' / ' + limit;
+        var percent = Math.min(100, Math.round((today / limit) * 100));
+        document.getElementById('daily-bar').style.width = percent + '%';
+
+        // Account badge
+        var accBadge = document.getElementById('account-badge');
+        if (data.tiktok_connected) {
+          accBadge.innerText = '🟢 ' + (data.tiktok_user || 'TikTok Connected');
+          accBadge.style.color = '#10b981';
+          accBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
+          accBadge.style.background = 'rgba(16, 185, 129, 0.12)';
+        } else {
+          accBadge.innerHTML = '<a href="/login" style="color:#fe2c55; text-decoration:none;">🔴 Not Connected (Login)</a>';
+          accBadge.style.borderColor = 'rgba(254, 44, 85, 0.4)';
+          accBadge.style.background = 'rgba(254, 44, 85, 0.12)';
         }
 
-        // Render logs
-        var logsDiv = document.getElementById('logs-view');
+        if (data.next_post_time) {
+          nextPostTimestamp = new Date(data.next_post_time).getTime();
+          document.getElementById('next-post-time').innerText = 'Target: ' + data.next_post_str;
+        } else {
+          nextPostTimestamp = null;
+          document.getElementById('next-post-countdown').innerText = 'Queue Empty';
+          document.getElementById('next-post-time').innerText = 'Add reels to Drive folder';
+        }
+
         if (data.recent_logs && data.recent_logs.length > 0) {
-          logsDiv.innerHTML = data.recent_logs.map(function(l) {
-            var cls = 'log-line';
-            if (l.indexOf('[ERROR]') !== -1) cls += ' log-err';
-            else if (l.indexOf('[WARNING]') !== -1) cls += ' log-warn';
-            else if (l.indexOf('[INFO]') !== -1) cls += ' log-info';
-            return '<div class="' + cls + '">' + escapeHtml(l) + '</div>';
-          }).join('');
-          logsDiv.scrollTop = logsDiv.scrollHeight;
+          var logsView = document.getElementById('logs-view');
+          var isAtBottom = logsView.scrollHeight - logsView.clientHeight <= logsView.scrollTop + 40;
+          logsView.innerText = data.recent_logs.join('\\n');
+          if (isAtBottom) {
+            logsView.scrollTop = logsView.scrollHeight;
+          }
         }
-
       } catch (err) {
-        console.error('Stats fetch error:', err);
+        console.error('Fetch error:', err);
       }
-    }
-
-    function escapeHtml(str) {
-      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
     function updateCountdown() {
-      var el = document.getElementById('next-post-countdown');
-      if (!nextPostTimestamp) {
-        if (el) el.innerText = 'Ready / Active';
-        return;
-      }
-      var target = new Date(nextPostTimestamp).getTime();
+      if (!nextPostTimestamp) return;
       var now = new Date().getTime();
-      var diff = target - now;
+      var diff = nextPostTimestamp - now;
+      var el = document.getElementById('next-post-countdown');
+
       if (diff <= 0) {
         if (el) el.innerText = 'Due Now';
       } else {
@@ -527,15 +441,596 @@ DASHBOARD_HTML = """
 </html>
 """
 
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Connect TikTok Account | TIME PASS</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #07090e;
+      --card-bg: #121826;
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent: #fe2c55;
+      --accent-grad: linear-gradient(135deg, #fe2c55 0%, #25f4ee 100%);
+      --cyan: #25f4ee;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --success: #10b981;
+      --warning: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: radial-gradient(circle at top, #141c2e 0%, #07090e 100%);
+      color: var(--text);
+      font-family: 'Outfit', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+    .login-container {
+      max-width: 540px;
+      width: 100%;
+      background: var(--card-bg);
+      border: 1px solid rgba(254, 44, 85, 0.3);
+      border-radius: 24px;
+      padding: 32px;
+      box-shadow: 0 0 60px rgba(254, 44, 85, 0.2);
+    }
+    .header-title {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .header-title h1 {
+      font-size: 26px;
+      font-weight: 800;
+      background: var(--accent-grad);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 6px;
+    }
+    .header-title p {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .tabs {
+      display: flex;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 14px;
+      padding: 4px;
+      margin-bottom: 24px;
+      gap: 4px;
+      overflow-x: auto;
+    }
+    .tab-btn {
+      flex: 1;
+      min-width: 90px;
+      text-align: center;
+      padding: 10px 8px;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-family: 'Outfit', sans-serif;
+      font-size: 12px;
+      font-weight: 700;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+    .tab-btn.active {
+      background: var(--accent);
+      color: #fff;
+      box-shadow: 0 2px 10px rgba(254, 44, 85, 0.4);
+    }
+    .tab-pane {
+      display: none;
+    }
+    .tab-pane.active {
+      display: block;
+      animation: fadeIn 0.3s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .form-group {
+      margin-bottom: 16px;
+      text-align: left;
+    }
+    .form-group label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+    .form-control {
+      width: 100%;
+      background: rgba(7, 9, 14, 0.8);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 12px 16px;
+      font-size: 14px;
+      color: #fff;
+      outline: none;
+      font-family: 'Outfit', sans-serif;
+      transition: border 0.2s ease;
+    }
+    .form-control:focus {
+      border-color: var(--cyan);
+    }
+    textarea.form-control {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      resize: vertical;
+      min-height: 120px;
+    }
+    .btn-submit {
+      width: 100%;
+      background: var(--accent-grad);
+      color: #fff;
+      border: none;
+      padding: 14px;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 0.2s ease;
+      margin-top: 8px;
+    }
+    .btn-submit:hover {
+      opacity: 0.92;
+    }
+    .alert-box {
+      border-radius: 12px;
+      padding: 12px 16px;
+      font-size: 13px;
+      margin-top: 16px;
+      display: none;
+      line-height: 1.5;
+    }
+    .alert-info {
+      background: rgba(37, 244, 238, 0.12);
+      border: 1px solid rgba(37, 244, 238, 0.3);
+      color: var(--cyan);
+    }
+    .alert-success {
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: var(--success);
+    }
+    .alert-error {
+      background: rgba(254, 44, 85, 0.12);
+      border: 1px solid rgba(254, 44, 85, 0.3);
+      color: #ff6b81;
+    }
+    /* 2FA Card */
+    .two-fa-card {
+      background: rgba(37, 244, 238, 0.05);
+      border: 1px solid rgba(37, 244, 238, 0.25);
+      border-radius: 16px;
+      padding: 18px;
+      margin-top: 18px;
+      display: none;
+      text-align: center;
+    }
+    .two-fa-card h3 {
+      font-size: 16px;
+      color: var(--cyan);
+      margin-bottom: 6px;
+    }
+    .two-fa-card p {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+    }
+    .otp-input {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 24px;
+      letter-spacing: 8px;
+      text-align: center;
+      width: 200px;
+      padding: 10px;
+      background: rgba(7, 9, 14, 0.9);
+      border: 2px solid var(--cyan);
+      border-radius: 12px;
+      color: #fff;
+      margin-bottom: 12px;
+      outline: none;
+    }
+    /* QR View */
+    .qr-view {
+      text-align: center;
+      padding: 10px 0;
+    }
+    .qr-card-box {
+      background: #ffffff;
+      padding: 14px;
+      border-radius: 16px;
+      display: inline-block;
+      margin: 14px 0;
+      width: 240px;
+      height: 240px;
+    }
+    .qr-card-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    /* 1-Click Sync */
+    .sync-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 20px;
+      text-align: left;
+    }
+    .sync-card h3 {
+      font-size: 16px;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+    .sync-card p {
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.6;
+      margin-bottom: 14px;
+    }
+    .sync-steps {
+      font-size: 13px;
+      color: #e5e7eb;
+      line-height: 1.8;
+      margin-bottom: 18px;
+      padding-left: 18px;
+    }
+    .btn-download {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--accent-grad);
+      color: #fff;
+      padding: 12px 20px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 700;
+      text-decoration: none;
+      box-shadow: 0 4px 14px rgba(254, 44, 85, 0.4);
+    }
+    .back-nav {
+      text-align: center;
+      margin-top: 20px;
+    }
+    .back-nav a {
+      color: var(--text-muted);
+      font-size: 13px;
+      text-decoration: none;
+    }
+    .back-nav a:hover {
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-container">
+    <div class="header-title">
+      <h1>Connect TikTok Account</h1>
+      <p>Choose your preferred login method below</p>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('email', this)">📧 Email / User</button>
+      <button class="tab-btn" onclick="switchTab('cookies', this)">🍪 Paste Cookies</button>
+      <button class="tab-btn" onclick="switchTab('sync', this)">💻 1-Click Sync</button>
+      <button class="tab-btn" onclick="switchTab('qr', this)">📱 QR Code</button>
+    </div>
+
+    <!-- TAB 1: Email / Username + Password -->
+    <div id="tab-email" class="tab-pane active">
+      <div class="form-group">
+        <label>Email or Username</label>
+        <input type="text" id="login-identifier" class="form-control" placeholder="@rdxthedeveloper or user@gmail.com" />
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="login-password" class="form-control" placeholder="TikTok Account Password" />
+      </div>
+      <button id="btn-login" class="btn-submit" onclick="submitCredentials()">🚀 Sign In with TikTok</button>
+
+      <!-- 2FA Code Prompt -->
+      <div id="twofa-container" class="two-fa-card">
+        <h3>🔐 Two-Step Verification Required</h3>
+        <p>TikTok sent a 6-digit verification code to your email/phone. Enter it below:</p>
+        <input type="text" id="twofa-code" class="otp-input" placeholder="------" maxlength="6" />
+        <br>
+        <button class="btn-submit" style="width: auto; padding: 10px 24px;" onclick="submit2FACode()">✅ Verify & Connect</button>
+      </div>
+
+      <div id="email-alert" class="alert-box"></div>
+    </div>
+
+    <!-- TAB 2: Paste Cookies / Session ID -->
+    <div id="tab-cookies" class="tab-pane">
+      <div class="form-group">
+        <label>Session ID or Cookie JSON</label>
+        <p style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">
+          Paste your <code>sessionid</code> (e.g. <code>7a8b9c...</code>) or full Cookie JSON from the Cookie-Editor extension:
+        </p>
+        <textarea id="cookie-input" class="form-control" placeholder='Paste sessionid or [{"name":"sessionid", "value":"..."}, ...]'></textarea>
+      </div>
+      <button class="btn-submit" onclick="submitCookies()">💾 Save & Connect TikTok</button>
+      <div id="cookie-alert" class="alert-box"></div>
+    </div>
+
+    <!-- TAB 3: 1-Click Local PC Sync (Google, Apple, Facebook) -->
+    <div id="tab-sync" class="tab-pane">
+      <div class="sync-card">
+        <h3>⚡ 1-Click Local PC Sync (Best for Google Logins)</h3>
+        <p>
+          Google OAuth actively blocks headless cloud servers, but this utility runs on your PC (where you are already logged in to TikTok Studio with Google or any method) and syncs your session directly to Railway!
+        </p>
+        <ol class="sync-steps">
+          <li>Download the 1-click synchronizer script below.</li>
+          <li>Double-click <b>sync_session.bat</b> on your computer.</li>
+          <li>It connects to your browser and syncs TikTok to Railway in 3 seconds!</li>
+        </ol>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <a href="/download/sync_session.bat" class="btn-download">⬇️ Download sync_session.bat</a>
+          <a href="/download/sync_session.py" class="btn-download" style="background:#1f2937; border:1px solid rgba(255,255,255,0.1);">Download .py</a>
+        </div>
+      </div>
+      <div id="sync-alert" class="alert-box"></div>
+    </div>
+
+    <!-- TAB 4: QR Code Scanner -->
+    <div id="tab-qr" class="tab-pane">
+      <div class="qr-view">
+        <p style="font-size:13px; color:var(--text-muted); margin-bottom:12px; text-align:left;">
+          1. Open <b>TikTok App</b> on your phone.<br>
+          2. Tap <b>Profile ➔ ☰ Menu ➔ My QR Code ➔ 📷 Scan icon</b>.<br>
+          3. Point camera at this QR code & tap <b>Confirm Login</b>.
+        </p>
+        <div class="qr-card-box">
+          <img id="qr-img" src="" alt="TikTok QR Code" />
+        </div>
+        <div id="qr-status-txt" style="font-size:14px; font-weight:700; color:var(--cyan); margin-bottom:14px;">
+          Requesting QR code...
+        </div>
+        <button onclick="startQr()" class="tab-btn" style="background:#1f2937; padding:8px 18px; display:inline-block;">🔄 Refresh QR</button>
+      </div>
+    </div>
+
+    <div class="back-nav">
+      <a href="/">← Return to Bot Dashboard</a>
+    </div>
+  </div>
+
+  <script>
+    let pollTimer = null;
+
+    function switchTab(name, btn) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+      
+      var target = document.getElementById('tab-' + name);
+      if (target) target.classList.add('active');
+      if (btn) btn.classList.add('active');
+
+      if (name === 'qr') {
+        startQr();
+      } else {
+        stopQrPoll();
+      }
+    }
+
+    function showAlert(boxId, type, msg) {
+      var box = document.getElementById(boxId);
+      if (!box) return;
+      box.className = 'alert-box alert-' + type;
+      box.innerText = msg;
+      box.style.display = 'block';
+    }
+
+    // -------------------------------------------------------------
+    // Email / Credentials Flow
+    // -------------------------------------------------------------
+    async function submitCredentials() {
+      var id = document.getElementById('login-identifier').value.trim();
+      var pw = document.getElementById('login-password').value.trim();
+      if (!id || !pw) {
+        showAlert('email-alert', 'error', 'Please enter your username/email and password.');
+        return;
+      }
+
+      showAlert('email-alert', 'info', 'Connecting to TikTok and submitting credentials...');
+      document.getElementById('btn-login').disabled = true;
+
+      try {
+        var resp = await fetch('/api/login/credentials', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({identifier: id, password: pw})
+        });
+        var data = await resp.json();
+        handleAuthStatus(data);
+        startStatusPoll();
+      } catch (e) {
+        showAlert('email-alert', 'error', 'Request failed: ' + e);
+        document.getElementById('btn-login').disabled = false;
+      }
+    }
+
+    async function submit2FACode() {
+      var code = document.getElementById('twofa-code').value.trim();
+      if (!code || code.length < 4) {
+        showAlert('email-alert', 'error', 'Please enter a valid verification code.');
+        return;
+      }
+      showAlert('email-alert', 'info', 'Verifying code with TikTok...');
+
+      try {
+        var resp = await fetch('/api/login/verify-2fa', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({code: code})
+        });
+        var data = await resp.json();
+        handleAuthStatus(data);
+      } catch (e) {
+        showAlert('email-alert', 'error', 'Error submitting code: ' + e);
+      }
+    }
+
+    function handleAuthStatus(d) {
+      if (d.status === 'waiting_for_2fa' || d.is_2fa_required) {
+        document.getElementById('twofa-container').style.display = 'block';
+        showAlert('email-alert', 'info', 'TikTok sent a 6-digit code. Please enter it above.');
+      } else if (d.status === 'authenticated') {
+        showAlert('email-alert', 'success', '🎉 Successfully logged in as ' + (d.user || 'TikTok User') + '! Redirecting...');
+        setTimeout(() => { window.location.href = '/'; }, 2000);
+      } else if (d.status === 'error') {
+        showAlert('email-alert', 'error', d.error || 'Login failed. Try Cookie Paste or Local Sync.');
+        document.getElementById('btn-login').disabled = false;
+      } else if (d.status === 'logging_in') {
+        showAlert('email-alert', 'info', d.info || 'Submitting credentials to TikTok...');
+      }
+    }
+
+    function startStatusPoll() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(async () => {
+        try {
+          var r = await fetch('/api/login/status');
+          var d = await r.json();
+          handleAuthStatus(d);
+          if (d.status === 'authenticated' || d.status === 'error') {
+            clearInterval(pollTimer);
+          }
+        } catch(e) {}
+      }, 2000);
+    }
+
+    // -------------------------------------------------------------
+    // Cookie Flow
+    // -------------------------------------------------------------
+    async function submitCookies() {
+      var raw = document.getElementById('cookie-input').value.trim();
+      if (!raw) {
+        showAlert('cookie-alert', 'error', 'Please paste your sessionid or cookie JSON.');
+        return;
+      }
+      showAlert('cookie-alert', 'info', 'Verifying session with TikTok Studio...');
+
+      try {
+        var resp = await fetch('/api/login/paste-cookies', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({cookies: raw})
+        });
+        var data = await resp.json();
+        if (data.success) {
+          showAlert('cookie-alert', 'success', '🎉 ' + data.message + ' Redirecting to dashboard...');
+          setTimeout(() => { window.location.href = '/'; }, 2000);
+        } else {
+          showAlert('cookie-alert', 'error', data.error || 'Cookies were rejected or expired.');
+        }
+      } catch (e) {
+        showAlert('cookie-alert', 'error', 'Error: ' + e);
+      }
+    }
+
+    // -------------------------------------------------------------
+    // QR Flow
+    // -------------------------------------------------------------
+    let qrTimer = null;
+    async function startQr() {
+      document.getElementById('qr-status-txt').innerText = 'Generating TikTok QR code...';
+      try {
+        var resp = await fetch('/api/qr/start', {method: 'POST'});
+        var data = await resp.json();
+        updateQrUI(data);
+      } catch(e) {}
+
+      if (qrTimer) clearInterval(qrTimer);
+      qrTimer = setInterval(async () => {
+        try {
+          var r = await fetch('/api/qr/status');
+          var d = await r.json();
+          updateQrUI(d);
+          if (d.status === 'authenticated') {
+            clearInterval(qrTimer);
+            document.getElementById('qr-status-txt').innerText = '🎉 Login Confirmed! Redirecting...';
+            document.getElementById('qr-status-txt').style.color = '#10b981';
+            setTimeout(() => { window.location.href = '/'; }, 2000);
+          }
+        } catch(e) {}
+      }, 2000);
+    }
+
+    function updateQrUI(d) {
+      if (d.qr_image && d.qr_image.length > 50) {
+        document.getElementById('qr-img').src = d.qr_image;
+      }
+      if (d.status === 'waiting_for_qr' || d.status === 'waiting_for_scan') {
+        document.getElementById('qr-status-txt').innerText = 'Waiting for TikTok app scan...';
+        document.getElementById('qr-status-txt').style.color = '#25f4ee';
+      } else if (d.status === 'expired') {
+        document.getElementById('qr-status-txt').innerText = '⚠️ QR Expired. Click Refresh QR.';
+        document.getElementById('qr-status-txt').style.color = '#f59e0b';
+      }
+    }
+
+    function stopQrPoll() {
+      if (qrTimer) clearInterval(qrTimer);
+    }
+
+    // Check URL query parameters for active tab (?tab=qr or ?tab=sync)
+    window.addEventListener('DOMContentLoaded', () => {
+      var params = new URLSearchParams(window.location.search);
+      var tabParam = params.get('tab');
+      if (tabParam) {
+        var btn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.innerText.toLowerCase().includes(tabParam.toLowerCase()));
+        if (btn) switchTab(tabParam, btn);
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+
+# -----------------------------------------------------------------
+# Flask Routes
+# -----------------------------------------------------------------
+
 @app.route("/")
 def index():
     return render_template_string(DASHBOARD_HTML)
+
+
+@app.route("/login")
+def login_portal():
+    return render_template_string(LOGIN_HTML)
+
+
+@app.route("/qr")
+def qr_redirect():
+    return redirect("/login?tab=qr")
+
 
 @app.route("/logo.png")
 def logo():
     if config.WATERMARK_PATH.exists():
         return send_file(str(config.WATERMARK_PATH), mimetype="image/png")
     return "", 404
+
 
 @app.route("/api/status")
 def status():
@@ -545,7 +1040,6 @@ def status():
     mins, secs = divmod(remainder, 60)
     uptime_str = f"{hrs}h {mins}m {secs}s" if hrs > 0 else f"{mins}m {secs}s"
 
-    # Read last 40 lines of bot.log if present
     recent_logs = []
     log_file = config.BASE_DIR / "bot.log"
     if log_file.exists():
@@ -559,6 +1053,11 @@ def status():
     next_post_iso = bot_state["next_post_time"].isoformat() if bot_state["next_post_time"] else None
     next_post_str = bot_state["next_post_time"].strftime("%I:%M:%S %p") if bot_state["next_post_time"] else None
 
+    # Check TikTok authentication status
+    session_file = config.BASE_DIR / "tiktok_session.json"
+    tiktok_connected = session_file.exists() or bool(getattr(config, "TIKTOK_COOKIES_JSON", None)) or bool(getattr(config, "TIKTOK_SESSION_ID", None))
+    tiktok_user = "@rdxthedeveloper" if tiktok_connected else None
+
     return jsonify({
         "status": bot_state["status"],
         "sub_status": bot_state["sub_status"],
@@ -569,8 +1068,11 @@ def status():
         "drive_queue_count": bot_state["drive_queue_count"],
         "next_post_time": next_post_iso,
         "next_post_str": next_post_str,
-        "recent_logs": recent_logs
+        "recent_logs": recent_logs,
+        "tiktok_connected": tiktok_connected,
+        "tiktok_user": tiktok_user
     })
+
 
 @app.route("/api/trigger", methods=["POST"])
 def trigger():
@@ -578,6 +1080,7 @@ def trigger():
     bot_state["status"] = "Manual Trigger Received"
     bot_state["sub_status"] = "Processing queue immediately..."
     return jsonify({"success": True, "message": "Trigger received! Bot will process next video now."})
+
 
 @app.route("/api/screenshot")
 def screenshot():
@@ -587,6 +1090,7 @@ def screenshot():
             return send_file(str(p), mimetype="image/png")
     return jsonify({"error": "No screenshot available"}), 404
 
+
 @app.route("/api/screenshot/qr")
 def qr_screenshot():
     p = config.TEMP_DIR / "login_qr.png"
@@ -594,147 +1098,115 @@ def qr_screenshot():
         return send_file(str(p), mimetype="image/png")
     return jsonify({"error": "No QR screenshot found"}), 404
 
+
+# -----------------------------------------------------------------
+# Multi-Method Auth API Routes
+# -----------------------------------------------------------------
+
+@app.route("/api/login/credentials", methods=["POST"])
+def login_credentials():
+    from auth_manager import TikTokAuthManager
+    data = request.get_json() or {}
+    identifier = data.get("identifier", "").strip()
+    password = data.get("password", "").strip()
+    if not identifier or not password:
+        return jsonify({"status": "error", "error": "Username and password required"}), 400
+
+    manager = TikTokAuthManager()
+    res = manager.start_credentials_login(identifier, password)
+    return jsonify(res)
+
+
+@app.route("/api/login/verify-2fa", methods=["POST"])
+def verify_2fa():
+    from auth_manager import TikTokAuthManager
+    data = request.get_json() or {}
+    code = data.get("code", "").strip()
+    if not code:
+        return jsonify({"error": "Verification code is required"}), 400
+
+    manager = TikTokAuthManager()
+    res = manager.submit_2fa_code(code)
+    return jsonify(res)
+
+
+@app.route("/api/login/paste-cookies", methods=["POST"])
+def paste_cookies():
+    from auth_manager import TikTokAuthManager
+    data = request.get_json() or {}
+    raw_cookies = data.get("cookies", "").strip()
+    if not raw_cookies:
+        return jsonify({"success": False, "error": "Cookie content cannot be empty"}), 400
+
+    manager = TikTokAuthManager()
+    res = manager.save_and_verify_cookies(raw_cookies)
+    return jsonify(res)
+
+
+@app.route("/api/login/status")
+def login_status():
+    from auth_manager import TikTokAuthManager
+    manager = TikTokAuthManager()
+    return jsonify(manager.get_status())
+
+
 @app.route("/api/qr/start", methods=["POST", "GET"])
 def qr_start():
-    from qr_login import TikTokQRLoginManager
-    manager = TikTokQRLoginManager()
-    res = manager.start_login_session()
+    from auth_manager import TikTokAuthManager
+    manager = TikTokAuthManager()
+    res = manager.start_qr_login()
     return jsonify(res)
+
 
 @app.route("/api/qr/status")
 def qr_status():
-    from qr_login import TikTokQRLoginManager
-    manager = TikTokQRLoginManager()
+    from auth_manager import TikTokAuthManager
+    manager = TikTokAuthManager()
     return jsonify(manager.get_status())
 
-@app.route("/qr")
-def qr_page():
-    from qr_login import TikTokQRLoginManager
-    manager = TikTokQRLoginManager()
-    st = manager.get_status()
-    if st["status"] == "idle":
-        st = manager.start_login_session()
 
-    qr_img = st.get("qr_image") or ""
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <title>Scan TikTok QR Code | TIME PASS</title>
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <link rel="preconnect" href="https://fonts.googleapis.com">
-      <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
-      <style>
-        body {
-          background: #07090e;
-          color: #f3f4f6;
-          font-family: 'Outfit', sans-serif;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          min-height: 100vh;
-          margin: 0;
-          padding: 20px;
-          text-align: center;
-        }
-        .box {
-          background: #121826;
-          border: 1px solid rgba(254,44,85,0.4);
-          box-shadow: 0 0 50px rgba(254,44,85,0.25);
-          border-radius: 20px;
-          padding: 32px 24px;
-          max-width: 440px;
-          width: 100%;
-          box-sizing: border-box;
-        }
-        .qr-card {
-          background: #ffffff;
-          padding: 16px;
-          border-radius: 16px;
-          display: inline-block;
-          margin: 16px 0;
-          min-width: 250px;
-          min-height: 250px;
-        }
-        img {
-          width: 250px;
-          height: 250px;
-          display: block;
-          object-fit: contain;
-        }
-        .instructions {
-          color: #9ca3af;
-          font-size: 14px;
-          line-height: 1.6;
-          margin-bottom: 16px;
-          text-align: left;
-        }
-        .btn {
-          background: #fe2c55;
-          color: #fff;
-          border: none;
-          padding: 10px 20px;
-          border-radius: 10px;
-          font-weight: 700;
-          cursor: pointer;
-          font-size: 14px;
-          text-decoration: none;
-          display: inline-block;
-        }
-        #status-text {
-          font-size: 15px;
-          font-weight: 700;
-          color: #25f4ee;
-          margin-top: 8px;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="box">
-        <h1 style="font-size:24px; margin-bottom:12px; background:linear-gradient(135deg, #fe2c55, #25f4ee); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">📱 Connect TikTok Account</h1>
-        <div class="instructions">
-          1. Open <b>TikTok App</b> on your mobile phone.<br>
-          2. Tap <b>Profile ➔ ☰ Menu ➔ My QR Code ➔ 📷 Scan icon</b>.<br>
-          3. Point your camera at this QR code & tap <b>Confirm Login</b>.
-        </div>
-        <div class="qr-card">
-          <img id="qrImg" src="{{ qr_img }}" alt="TikTok QR Code" />
-        </div>
-        <div id="status-text">Waiting for phone scan...</div>
-        <br>
-        <div style="display:flex; justify-content:center; gap:10px; margin-top:10px;">
-          <a href="/" class="btn" style="background:#374151;">← Dashboard</a>
-          <button onclick="location.reload()" class="btn">🔄 Refresh</button>
-        </div>
-      </div>
-      <script>
-        setInterval(async function() {
-          try {
-            var r = await fetch('/api/qr/status');
-            var d = await r.json();
-            if (d.qr_image && d.qr_image.length > 50) {
-              document.getElementById('qrImg').src = d.qr_image;
-            }
-            if (d.status === 'authenticated') {
-              document.getElementById('status-text').innerText = '🎉 Login Confirmed! TikTok Connected.';
-              document.getElementById('status-text').style.color = '#10b981';
-              setTimeout(function(){ window.location.href = '/'; }, 2000);
-            } else if (d.status === 'expired') {
-              document.getElementById('status-text').innerText = '⚠️ QR Expired. Click Refresh.';
-              document.getElementById('status-text').style.color = '#f59e0b';
-            }
-          } catch(e) {}
-        }, 2000);
-      </script>
-    </body>
-    </html>
-    """, qr_img=qr_img)
+@app.route("/api/session/upload", methods=["POST"])
+def session_upload():
+    """Receives JSON session export from sync_session.py."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "error": "No JSON payload provided"}), 400
+
+    session_file = config.BASE_DIR / "tiktok_session.json"
+    try:
+        with open(session_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+        from auth_manager import TikTokAuthManager
+        manager = TikTokAuthManager()
+        raw_str = json.dumps(data)
+        manager.save_and_verify_cookies(raw_str)
+
+        return jsonify({"success": True, "message": "Session received and verified successfully on Railway!"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/download/sync_session.bat")
+def download_bat():
+    bat_file = config.BASE_DIR / "sync_session.bat"
+    if bat_file.exists():
+        return send_file(str(bat_file), as_attachment=True, download_name="sync_session.bat")
+    return jsonify({"error": "File not found"}), 404
+
+
+@app.route("/download/sync_session.py")
+def download_py():
+    py_file = config.BASE_DIR / "sync_session.py"
+    if py_file.exists():
+        return send_file(str(py_file), as_attachment=True, download_name="sync_session.py")
+    return jsonify({"error": "File not found"}), 404
+
 
 def run_web_server():
     port = int(os.getenv("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
 
 if __name__ == "__main__":
     run_web_server()
