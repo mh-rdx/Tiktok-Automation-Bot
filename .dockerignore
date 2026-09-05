@@ -1,0 +1,14 @@
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+bot.log
+state.json
+temp/
+.git
+.gitignore
+.env
+service_account.json
+scratch/
