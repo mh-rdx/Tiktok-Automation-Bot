@@ -56,6 +56,8 @@ class StateManager:
                 with open(self.state_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if data.get("current_date") == today_str:
+                        if "skipped_ids" not in data:
+                            data["skipped_ids"] = []
                         return data
             except Exception as e:
                 logger.warning(f"Could not parse existing state file ({e}). Initializing fresh state.")
@@ -64,7 +66,8 @@ class StateManager:
         fresh_state = {
             "current_date": today_str,
             "posts_today": 0,
-            "last_post_timestamp": None
+            "last_post_timestamp": None,
+            "skipped_ids": []
         }
         self._save_state(fresh_state)
         return fresh_state
@@ -86,6 +89,7 @@ class StateManager:
             )
             self.state["current_date"] = today_str
             self.state["posts_today"] = 0
+            self.state["skipped_ids"] = []
             self._save_state(self.state)
 
     @property
@@ -102,6 +106,17 @@ class StateManager:
             f"Post logged successfully. Total posted today: {self.state['posts_today']} / {config.DAILY_LIMIT}"
         )
 
+    def get_skipped_ids(self) -> set:
+        return set(self.state.get("skipped_ids", []))
+
+    def record_skipped_id(self, file_id: str) -> None:
+        if "skipped_ids" not in self.state:
+            self.state["skipped_ids"] = []
+        if file_id not in self.state["skipped_ids"]:
+            self.state["skipped_ids"].append(file_id)
+            self._save_state(self.state)
+            logger.info(f"Recorded file ID {file_id} to persistent skipped list.")
+
 
 class BotOrchestrator:
     def __init__(self):
@@ -110,6 +125,10 @@ class BotOrchestrator:
         self.drive = DriveService()
         self.processor = VideoProcessor()
         self.uploader = TikTokUploader()
+        self.last_job_skipped = False
+
+        # Clean any stale/leftover videos from previous crashes or local storage
+        self._purge_stale_temp_files()
 
         # Start live Web Dashboard in background thread
         self.web_thread = threading.Thread(target=run_web_server, daemon=True)
@@ -124,6 +143,18 @@ class BotOrchestrator:
         # Handle graceful shutdown on Ctrl+C and kill signals
         signal.signal(signal.SIGINT, self._handle_exit)
         signal.signal(signal.SIGTERM, self._handle_exit)
+
+    def _purge_stale_temp_files(self) -> None:
+        """Purges any leftover video files in TEMP_DIR to prevent reusing stale or deleted files."""
+        try:
+            for item in config.TEMP_DIR.glob("*.mp4"):
+                try:
+                    item.unlink(missing_ok=True)
+                    logger.info(f"Cleaned up stale temp video file from storage: {item.name}")
+                except Exception as e:
+                    logger.warning(f"Could not remove stale temp file {item.name}: {e}")
+        except Exception as e:
+            logger.warning(f"Error while purging stale temp files: {e}")
 
     def _handle_exit(self, signum, frame):
         logger.info("Shutdown signal received. Completing active work and shutting down cleanly...")
@@ -190,6 +221,14 @@ class BotOrchestrator:
         raw_path = config.TEMP_DIR / f"raw_{file_id}.mp4"
         processed_path = config.TEMP_DIR / f"watermarked_{file_id}.mp4"
 
+        # Pre-clean any leftover artifacts for this file_id
+        for p in [raw_path, processed_path]:
+            if p.exists():
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
         try:
             logger.info(f"========== Processing Pipeline Initiated: '{file_name}' ==========")
             bot_state["status"] = f"Processing: {file_name}"
@@ -220,9 +259,15 @@ class BotOrchestrator:
                 bot_state["total_posts"] = bot_state.get("total_posts", 0) + 1
                 return True
             else:
-                logger.error(f"Upload was not confirmed by TikTok for '{file_name}'. Retaining Drive file.")
-                bot_state["status"] = "Publish Failed"
-                bot_state["sub_status"] = "TikTok did not confirm publish"
+                logger.error(
+                    f"Upload was not confirmed by TikTok for '{file_name}'. "
+                    f"Removing from Drive queue and skipping to avoid infinite retry loop."
+                )
+                bot_state["status"] = "Publish Failed (Skipped)"
+                bot_state["sub_status"] = f"Skipped '{file_name}', fetching next"
+                self.drive.delete_video(file_id)
+                self.state_mgr.record_skipped_id(file_id)
+                self.last_job_skipped = True
                 return False
 
         except TikTokContentRestrictedError as rest_err:
@@ -236,13 +281,18 @@ class BotOrchestrator:
 
             # Delete the restricted video from Google Drive so it is never reprocessed
             self.drive.delete_video(file_id)
-            self.last_job_restricted = True
+            self.state_mgr.record_skipped_id(file_id)
+            self.last_job_skipped = True
             return False
 
         except Exception as e:
             logger.error(f"Exception during processing of '{file_name}' (ID: {file_id}): {e}", exc_info=True)
-            bot_state["status"] = "Error"
-            bot_state["sub_status"] = str(e)[:60]
+            bot_state["status"] = "Error (Skipped)"
+            bot_state["sub_status"] = f"Error: {str(e)[:40]}"
+            # Remove/trash from Drive and skip to avoid getting stuck on this video
+            self.drive.delete_video(file_id)
+            self.state_mgr.record_skipped_id(file_id)
+            self.last_job_skipped = True
             return False
 
         finally:
@@ -277,8 +327,8 @@ class BotOrchestrator:
                 bot_state["status"] = "Checking Google Drive Queue..."
                 bot_state["sub_status"] = "Searching for pending reels"
 
-                # Query Google Drive for the oldest reel (FIFO)
-                video_file = self.drive.get_oldest_video()
+                # Query Google Drive for the oldest reel (FIFO), excluding failed/skipped IDs
+                video_file = self.drive.get_oldest_video(exclude_ids=self.state_mgr.get_skipped_ids())
 
                 if not video_file:
                     logger.info(
@@ -305,18 +355,18 @@ class BotOrchestrator:
                     bot_state["next_post_time"] = target_time
                     logger.info(f"Waiting {interval // 60} minutes before next scheduled post...")
                     self._interruptible_sleep(interval)
-                elif getattr(self, "last_job_restricted", False):
-                    self.last_job_restricted = False
-                    logger.info("Restricted reel removed from Drive. Picking up next reel from queue in 30 seconds...")
-                    bot_state["status"] = "Restricted Reel Deleted"
+                elif getattr(self, "last_job_skipped", False):
+                    self.last_job_skipped = False
+                    logger.info("Failed/Restricted reel skipped and removed from Drive. Picking up next reel in 30 seconds...")
+                    bot_state["status"] = "Reel Skipped (Removed)"
                     bot_state["sub_status"] = "Picking up next reel in 30s..."
                     self._interruptible_sleep(30)
                 else:
-                    # On single failure, back off briefly (5 min) and keep daemon alive
-                    logger.warning("Job failed. Waiting 5 minutes before retrying queue...")
-                    bot_state["status"] = "Temporary Backoff (5m)"
+                    # Fallback short backoff
+                    logger.warning("Job not completed. Advancing queue in 30 seconds...")
+                    bot_state["status"] = "Advancing Queue (30s)"
                     bot_state["sub_status"] = "Retrying Drive queue shortly"
-                    self._interruptible_sleep(300)
+                    self._interruptible_sleep(30)
 
             except Exception as loop_err:
                 logger.critical(f"Unexpected error in daemon main loop: {loop_err}", exc_info=True)

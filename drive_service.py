@@ -55,11 +55,14 @@ class DriveService:
         self.service = build("drive", "v3", credentials=self.credentials, cache_discovery=False)
         logger.info("Google Drive v3 client initialized and authenticated successfully.")
 
-    def get_oldest_video(self) -> Optional[Dict[str, Any]]:
+    def get_oldest_video(self, exclude_ids: Optional[set] = None) -> Optional[Dict[str, Any]]:
         """
         Searches the configured Drive folder for video files or video shortcuts
-        and returns the oldest one (FIFO).
+        and returns the oldest valid one (FIFO).
+        Validates that shortcut targets actually exist and are not trashed.
+        Skips any item IDs present in exclude_ids.
         """
+        exclude = exclude_ids or set()
         try:
             # Look inside folder for any non-trashed items, excluding folders
             query = f"'{config.DRIVE_FOLDER_ID}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'"
@@ -80,6 +83,10 @@ class DriveService:
             video_extensions = (".mp4", ".mov", ".mkv", ".avi", ".webm")
 
             for item in files:
+                item_id = item.get("id")
+                if item_id in exclude:
+                    continue
+
                 mime = item.get("mimeType", "")
                 name = item.get("name", "").lower()
 
@@ -89,7 +96,35 @@ class DriveService:
                     target_mime = details.get("targetMimeType", "")
                     target_id = details.get("targetId")
 
+                    if not target_id or target_id in exclude:
+                        continue
+
                     if target_mime.startswith("video/") or name.endswith(video_extensions):
+                        # Verify target file actually exists and is not trashed in Google Drive
+                        try:
+                            t_meta = self.service.files().get(
+                                fileId=target_id,
+                                fields="id, name, trashed",
+                                supportsAllDrives=True
+                            ).execute()
+                            if t_meta.get("trashed", False):
+                                logger.warning(
+                                    f"Target of shortcut '{item['name']}' ({target_id}) is in TRASH. "
+                                    f"Cleaning up orphaned shortcut from queue..."
+                                )
+                                self.delete_video(item_id)
+                                continue
+                        except HttpError as t_err:
+                            if t_err.resp.status in (404, 403):
+                                logger.warning(
+                                    f"Target of shortcut '{item['name']}' ({target_id}) is missing or inaccessible ({t_err.resp.status}). "
+                                    f"Cleaning up orphaned shortcut from queue..."
+                                )
+                                self.delete_video(item_id)
+                                continue
+                            else:
+                                logger.warning(f"Error checking target file {target_id}: {t_err}")
+
                         item["download_id"] = target_id
                         logger.info(
                             f"Found video shortcut: '{item['name']}' "
@@ -99,7 +134,7 @@ class DriveService:
 
                 # Direct video file
                 elif mime.startswith("video/") or name.endswith(video_extensions):
-                    item["download_id"] = item["id"]
+                    item["download_id"] = item_id
                     logger.info(
                         f"Found direct video: '{item['name']}' "
                         f"(ID: {item['id']}, Created: {item.get('createdTime')})"
@@ -165,11 +200,11 @@ class DriveService:
 
     def delete_video(self, file_id: str) -> bool:
         """
-        Moves the completed video/shortcut from the active queue folder to the 'Uploaded_Reels' folder,
-        or permanently deletes it if owner permissions permit.
+        Moves the completed or skipped video/shortcut from the active queue folder to the 'Uploaded_Reels' folder,
+        or marks it trashed, or permanently deletes it.
         """
         try:
-            # First attempt to move to archive subfolder
+            # 1. Attempt to move to archive subfolder
             archive_id = self._get_or_create_archive_folder()
             self.service.files().update(
                 fileId=file_id,
@@ -180,11 +215,23 @@ class DriveService:
             logger.info(f"Item {file_id} successfully moved to 'Uploaded_Reels' archive folder.")
             return True
         except Exception as move_err:
-            logger.warning(f"Move to archive folder failed ({move_err}). Trying direct deletion...")
+            logger.warning(f"Move to archive folder failed for {file_id} ({move_err}). Trying to mark as trashed...")
             try:
-                self.service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
-                logger.info(f"Item {file_id} permanently deleted from Google Drive.")
+                # 2. Attempt to mark as trashed
+                self.service.files().update(
+                    fileId=file_id,
+                    body={"trashed": True},
+                    supportsAllDrives=True
+                ).execute()
+                logger.info(f"Item {file_id} marked as trashed in Google Drive.")
                 return True
-            except Exception as del_err:
-                logger.error(f"Could not remove {file_id} from Drive: {del_err}")
-                return False
+            except Exception as trash_err:
+                logger.warning(f"Trashing failed for {file_id} ({trash_err}). Trying direct permanent deletion...")
+                try:
+                    # 3. Attempt direct permanent delete
+                    self.service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+                    logger.info(f"Item {file_id} permanently deleted from Google Drive.")
+                    return True
+                except Exception as del_err:
+                    logger.error(f"Could not remove {file_id} from Drive: {del_err}")
+                    return False

@@ -302,8 +302,8 @@ class TikTokUploader:
                 logger.info("Waiting for video upload & server processing to complete (up to 6 mins)...")
                 is_ready = False
                 for attempt in range(120):  # 120 * 3s = 360 seconds (6 minutes)
-                    # Regularly dismiss any check/advisory modals that pop up during processing
-                    self._dismiss_advisory_and_check_modals(page)
+                    # Regularly handle any active modals that pop up during processing
+                    self._handle_active_modals(page)
 
                     try:
                         # Re-locate post button to avoid stale element references on React re-render
@@ -408,6 +408,9 @@ class TikTokUploader:
                     browser.close()
                     raise TikTokUploadError("Post button was clicked but TikTok did not confirm publish within timeout.")
 
+            except TikTokContentRestrictedError:
+                browser.close()
+                raise
             except Exception as e:
                 err_pic = config.TEMP_DIR / "tiktok_error.png"
                 try:
@@ -460,6 +463,15 @@ class TikTokUploader:
 
                 modal_text = modal.inner_text().strip().replace("\n", " ")
                 logger.info(f"Active visible modal detected on page: '{modal_text[:90]}...'")
+
+                # If modal asks "Sure you want to cancel your upload?", click "No" to keep uploading!
+                if "cancel your upload" in modal_text.lower():
+                    no_btn = modal.locator('button:text-is("No"), button:has-text("No")').first
+                    if no_btn.count() > 0 and no_btn.is_visible():
+                        logger.info("Dismissing 'Sure you want to cancel your upload?' modal by clicking 'No'.")
+                        no_btn.click(force=True)
+                        page.wait_for_timeout(1000)
+                        return True
 
                 # A. Check for confirmation / proceed buttons inside this modal
                 # In TikTok Studio, confirmation dialogs have a button with "Post", "Post anyway", "Post now", "Continue to post", "Publish"
@@ -539,6 +551,8 @@ class TikTokUploader:
             logger.debug(f"Notice in _handle_active_modals: {e}")
 
         return handled
+
+    _dismiss_advisory_and_check_modals = _handle_active_modals
 
     def _detect_restriction_violation(self, page) -> Optional[str]:
         """
