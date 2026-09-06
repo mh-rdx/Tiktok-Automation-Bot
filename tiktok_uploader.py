@@ -251,6 +251,7 @@ class TikTokUploader:
 
 
                 # Dismiss any initial onboarding or permission modals
+                self._dismiss_joyride_and_onboarding(page)
                 self._handle_active_modals(page)
 
                 # Enter Caption
@@ -259,20 +260,69 @@ class TikTokUploader:
                 try:
                     page.wait_for_selector(caption_selector, timeout=30000)
                     caption_el = page.locator(caption_selector).first
+                    caption_el.scroll_into_view_if_needed()
+
+                    # Re-verify joyride tutorial overlay is dismissed so it cannot steal focus
+                    self._dismiss_joyride_and_onboarding(page)
+
                     caption_el.click(force=True)
+                    caption_el.focus()
                     page.wait_for_timeout(500)
 
-                    # Clear existing text
+                    # Clear existing text (TikTok pre-fills video filename by default)
                     page.keyboard.press("Control+A")
                     page.keyboard.press("Backspace")
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(300)
 
-                    # Insert caption with emojis and hashtags
+                    # If Draft.js retained text, force-clear using JavaScript Range API
+                    curr_text = caption_el.inner_text().strip()
+                    if curr_text:
+                        logger.info(f"Draft.js retained text after Backspace ({repr(curr_text)}). Clearing via Range API...")
+                        caption_el.evaluate("""
+                            el => {
+                                el.focus();
+                                const selection = window.getSelection();
+                                const range = document.createRange();
+                                range.selectNodeContents(el);
+                                selection.removeAllRanges();
+                                selection.addRange(range);
+                                document.execCommand('delete', false, null);
+                            }
+                        """)
+                        page.wait_for_timeout(300)
+
+                    # Insert caption with emojis and viral hashtags
                     logger.info("Typing caption and viral hashtags into Draft.js editor...")
                     page.keyboard.insert_text(post_caption)
-                    page.wait_for_timeout(1500)
+                    page.wait_for_timeout(1200)
                     page.keyboard.press("Escape")  # Dismiss hashtag suggestions dropdown
                     page.wait_for_timeout(500)
+
+                    # Verify caption text in editor
+                    final_caption = caption_el.inner_text().strip()
+                    logger.info(f"Verified editor text: {repr(final_caption[:80])}...")
+
+                    # If caption is missing or still equals the raw filename, retry once
+                    if not final_caption or final_caption == video_path.stem or final_caption == video_path.name:
+                        logger.warning(f"Caption was not applied (found: {repr(final_caption)})! Retrying caption input...")
+                        caption_el.click(force=True)
+                        caption_el.focus()
+                        page.keyboard.press("Control+A")
+                        page.keyboard.press("Backspace")
+                        page.wait_for_timeout(300)
+                        page.keyboard.insert_text(post_caption)
+                        page.wait_for_timeout(1000)
+                        page.keyboard.press("Escape")
+                        logger.info(f"Editor text after second attempt: {repr(caption_el.inner_text()[:80])}...")
+
+                    # Capture verification screenshot of the filled caption
+                    cap_pic = config.TEMP_DIR / "tiktok_caption_entered.png"
+                    try:
+                        page.screenshot(path=str(cap_pic))
+                        logger.info(f"Saved caption verification screenshot to {cap_pic}")
+                    except Exception:
+                        pass
+
                 except Exception as cap_err:
                     logger.warning(f"Could not fill caption via Draft.js ({cap_err}). Continuing with upload...")
 
@@ -421,6 +471,46 @@ class TikTokUploader:
                 browser.close()
                 raise TikTokUploadError(f"Playwright TikTok upload failed: {e}")
 
+    def _dismiss_joyride_and_onboarding(self, page) -> bool:
+        """
+        TikTok Studio frequently shows tutorial/onboarding walkthroughs via React Joyride
+        (e.g., 'New editing features added... Got it') that block pointer events and focus
+        on the Description editor and action buttons.
+        This method safely clicks 'Got it' / 'Skip' / 'Understand' or strips the overlay from DOM.
+        """
+        dismissed = False
+        try:
+            # 1. Look for visible tutorial / onboarding buttons inside joyride portal
+            joyride_btns = page.locator(
+                '#react-joyride-portal button, .react-joyride__tooltip button, '
+                'button:has-text("Got it"), button:has-text("Skip"), button:has-text("I understand")'
+            )
+            count = joyride_btns.count()
+            for i in range(count):
+                btn = joyride_btns.nth(i)
+                if btn.is_visible():
+                    txt = btn.inner_text().strip()
+                    logger.info(f"Dismissing TikTok onboarding/tutorial modal via button: '{txt}'")
+                    btn.click(force=True)
+                    page.wait_for_timeout(800)
+                    dismissed = True
+                    break
+        except Exception as e:
+            logger.debug(f"Notice during joyride button check: {e}")
+
+        # 2. Safety cleanup: remove any lingering joyride overlay or spotlight elements from DOM
+        try:
+            page.evaluate("""
+                () => {
+                    const elements = document.querySelectorAll('#react-joyride-portal, .react-joyride__overlay, .react-joyride__spotlight');
+                    elements.forEach(el => el.remove());
+                }
+            """)
+        except Exception:
+            pass
+
+        return dismissed
+
     def _handle_active_modals(self, page) -> bool:
         """
         Scans for genuinely VISIBLE modal dialogs on TikTok Studio and handles them:
@@ -432,6 +522,10 @@ class TikTokUploader:
         """
         handled = False
         try:
+            # Dismiss any joyride tutorials / spotlights first
+            if self._dismiss_joyride_and_onboarding(page):
+                handled = True
+
             # 1. Safety check: 'Sure you want to cancel your upload?' -> click 'No'
             no_btn = page.locator('button:text-is("No"), button:has-text("No")').first
             if no_btn.count() > 0 and no_btn.is_visible():
