@@ -562,10 +562,11 @@ class TikTokUploader:
         - 'Unoriginal, low-quality'
         - 'Ineligible for recommendation'
         Returns reason string if restricted, otherwise None.
+        Only inspects genuinely VISIBLE DOM elements to avoid false positives from hidden JS scripts.
         """
         try:
-            # 1. Check open modal
-            dialogs = page.locator('div[role="dialog"], div.TUXModal, div[class*="modal" i]')
+            # 1. Check open visible modal dialogs
+            dialogs = page.locator('div[role="dialog"]:visible, div.TUXModal:visible, div[class*="modal" i]:visible')
             for i in range(dialogs.count()):
                 d = dialogs.nth(i)
                 if d.is_visible():
@@ -576,19 +577,28 @@ class TikTokUploader:
                         or "unoriginal" in text
                         or "ineligible for recommendation" in text
                     ):
-                        return "Modal: Content may be restricted (Unoriginal / Low-quality content)"
+                        return f"Modal: {text[:80]}"
 
-            # 2. Check the Checks section on page DOM
-            checks_section = page.locator('div:has-text("Checks"), div:has-text("Content check lite")').first
-            if checks_section.count() > 0:
-                c_text = checks_section.inner_text().lower()
-                if "content may be restricted" in c_text or "ineligible for recommendation" in c_text:
-                    return "Checks section: Content may be restricted / Ineligible for recommendation"
-
-            # 3. Fallback check across page content
-            content = page.content().lower()
-            if "content may be restricted" in content and "checks" in content:
-                return "Page check: Content may be restricted"
+            # 2. Check genuinely visible warning banners or elements in Checks container
+            visible_warnings = page.locator(
+                'div[class*="warn" i]:visible, '
+                'div[class*="danger" i]:visible, '
+                'div[class*="error" i]:visible, '
+                'span:has-text("Content may be restricted"):visible, '
+                'div:has-text("Content may be restricted"):visible'
+            )
+            for i in range(visible_warnings.count()):
+                w = visible_warnings.nth(i)
+                if w.is_visible():
+                    w_text = w.inner_text().strip().lower()
+                    if (
+                        "content may be restricted" in w_text
+                        or "violation reason" in w_text
+                        or "ineligible for recommendation" in w_text
+                    ):
+                        # Ensure it's a specific badge or message (not the whole page container)
+                        if len(w_text) < 400:
+                            return f"Visible warning: {w_text[:80]}"
 
         except Exception as e:
             logger.debug(f"Notice in _detect_restriction_violation: {e}")
