@@ -33,8 +33,9 @@ DRIVE_FOLDER_ID = _get_env("GOOGLE_DRIVE_FOLDER_ID", required=False)
 TIKTOK_SESSION_ID = _get_env("TIKTOK_SESSION_ID", required=False)
 TIKTOK_COOKIES_JSON = _get_env("TIKTOK_COOKIES_JSON", required=False)
 TIKTOK_ACCESS_TOKEN = _get_env("TIKTOK_ACCESS_TOKEN", required=False)
-TIKTOK_OPEN_ID = _get_env("TIKTOK_OPEN_ID", required=False)
-DEFAULT_CAPTION = _get_env("DEFAULT_CAPTION", "Daily Reel! #fyp #trending", required=False)
+DEFAULT_CAPTION = _get_env("DEFAULT_CAPTION", "Hansi nahi rukegi! 😂 Dekho aage kya hua 👶✨ Follow for daily fun! 🎉 #TimePass #KidsComedy #FunnyKids #CuteBaby #Viral #Trending #FYP #ForYouPage #ComedyReels #CartoonKids #Humor #TikTokComedy", required=False)
+if "#" not in DEFAULT_CAPTION:
+    DEFAULT_CAPTION = f"{DEFAULT_CAPTION.strip()} #TimePass #KidsComedy #FunnyKids #CuteBaby #Viral #Trending #FYP #ForYouPage #ComedyReels #CartoonKids #Humor #TikTokComedy"
 
 # Video Processing Settings
 WATERMARK_PATH = Path(_get_env("WATERMARK_PATH", "logo.png", required=False))

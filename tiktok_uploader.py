@@ -44,9 +44,11 @@ class TikTokUploader:
         """
         from playwright.sync_api import sync_playwright
 
-        post_caption = caption or config.DEFAULT_CAPTION
+        post_caption = (caption or config.DEFAULT_CAPTION).strip()
+        if not post_caption.endswith(" "):
+            post_caption += " "
         logger.info(f"Starting TikTok Studio upload via Playwright for: {video_path.name}")
-        logger.info(f"Caption: {post_caption[:60]}...")
+        logger.info(f"Full Caption ({len(post_caption)} chars): {post_caption}")
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
