@@ -351,8 +351,8 @@ class BotOrchestrator:
                 bot_state["status"] = "Checking Google Drive Queue..."
                 bot_state["sub_status"] = "Searching for pending reels"
 
-                # Query Google Drive for the oldest reel (FIFO), excluding failed/skipped IDs
-                video_file = self.drive.get_oldest_video(exclude_ids=self.state_mgr.get_skipped_ids())
+                # Query Google Drive for the oldest reel (FIFO), excluding failed/skipped/processed IDs
+                video_file = self.drive.get_oldest_video(exclude_ids=self.state_mgr.get_excluded_ids())
 
                 if not video_file:
                     logger.info(
@@ -393,10 +393,23 @@ class BotOrchestrator:
                     self._interruptible_sleep(30)
 
             except Exception as loop_err:
-                logger.critical(f"Unexpected error in daemon main loop: {loop_err}", exc_info=True)
-                bot_state["status"] = "Exception Encountered"
-                bot_state["sub_status"] = "Recovering in 60s..."
-                self._interruptible_sleep(60)
+                err_str = str(loop_err).lower()
+                if "10054" in err_str or "connection" in err_str or isinstance(loop_err, (ConnectionResetError, ConnectionError, OSError)):
+                    logger.warning(
+                        f"Transient network reset in daemon loop: {loop_err}. Reconnecting Drive client and retrying in 15s..."
+                    )
+                    try:
+                        self.drive._init_service()
+                    except Exception:
+                        pass
+                    bot_state["status"] = "Reconnecting Network"
+                    bot_state["sub_status"] = "Retrying Drive queue in 15s..."
+                    self._interruptible_sleep(15)
+                else:
+                    logger.critical(f"Unexpected error in daemon main loop: {loop_err}", exc_info=True)
+                    bot_state["status"] = "Exception Encountered"
+                    bot_state["sub_status"] = "Recovering in 60s..."
+                    self._interruptible_sleep(60)
 
         logger.info("TikTok Automation Daemon stopped.")
 

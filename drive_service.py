@@ -6,6 +6,7 @@ support for Google Drive shortcuts, and verified permanent deletion of processed
 
 import os
 import io
+import time
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -52,8 +53,54 @@ class DriveService:
                 f"or the GOOGLE_SERVICE_ACCOUNT_JSON environment variable."
             )
 
-        self.service = build("drive", "v3", credentials=self.credentials, cache_discovery=False)
+        self._init_service()
         logger.info("Google Drive v3 client initialized and authenticated successfully.")
+
+    def _init_service(self):
+        """Initializes or refreshes the Google Drive API client and connection pool."""
+        self.service = build("drive", "v3", credentials=self.credentials, cache_discovery=False)
+
+    def _execute_with_retry(self, request_fn, max_retries: int = 5, base_delay: float = 2.0):
+        """
+        Executes a Google Drive API call with automatic reconnection and retry
+        for transient network errors (WinError 10054, ConnectionResetError, RemoteDisconnected, timeouts).
+        """
+        last_err = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                request = request_fn(self.service)
+                return request.execute()
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                is_transient = any([
+                    "10054" in err_str,
+                    "forcibly closed" in err_str,
+                    "connection reset" in err_str,
+                    "remotedisconnected" in err_str,
+                    "timed out" in err_str,
+                    "timeout" in err_str,
+                    "socket" in err_str,
+                    "broken pipe" in err_str,
+                    "ssl" in err_str,
+                    isinstance(e, (ConnectionResetError, ConnectionError, TimeoutError, OSError))
+                ])
+                if isinstance(e, HttpError) and e.resp.status in (429, 500, 502, 503, 504):
+                    is_transient = True
+
+                if is_transient and attempt < max_retries:
+                    delay = base_delay * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"Transient Google Drive network glitch ({e}). "
+                        f"Refreshing connection pool and retrying (attempt {attempt}/{max_retries}) in {delay:.1f}s..."
+                    )
+                    try:
+                        self._init_service()
+                    except Exception as reinit_err:
+                        logger.debug(f"Service re-init notice: {reinit_err}")
+                    time.sleep(delay)
+                    continue
+                raise last_err
 
     def get_oldest_video(self, exclude_ids: Optional[set] = None) -> Optional[Dict[str, Any]]:
         """
@@ -67,14 +114,16 @@ class DriveService:
             # Look inside folder for any non-trashed items, excluding folders
             query = f"'{config.DRIVE_FOLDER_ID}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'"
 
-            results = self.service.files().list(
-                q=query,
-                orderBy="createdTime asc",
-                pageSize=50,
-                fields="files(id, name, mimeType, size, createdTime, shortcutDetails)",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True
-            ).execute()
+            results = self._execute_with_retry(
+                lambda svc: svc.files().list(
+                    q=query,
+                    orderBy="createdTime asc",
+                    pageSize=50,
+                    fields="files(id, name, mimeType, size, createdTime, shortcutDetails)",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True
+                )
+            )
 
             files = results.get("files", [])
             if not files:
@@ -102,11 +151,13 @@ class DriveService:
                     if target_mime.startswith("video/") or name.endswith(video_extensions):
                         # Verify target file actually exists and is not trashed in Google Drive
                         try:
-                            t_meta = self.service.files().get(
-                                fileId=target_id,
-                                fields="id, name, trashed",
-                                supportsAllDrives=True
-                            ).execute()
+                            t_meta = self._execute_with_retry(
+                                lambda svc: svc.files().get(
+                                    fileId=target_id,
+                                    fields="id, name, trashed",
+                                    supportsAllDrives=True
+                                )
+                            )
                             if t_meta.get("trashed", False):
                                 logger.warning(
                                     f"Target of shortcut '{item['name']}' ({target_id}) is in TRASH. "
@@ -143,37 +194,58 @@ class DriveService:
 
             return None
 
-        except HttpError as e:
-            logger.error(f"Google Drive API error during list query: {e}")
+        except Exception as e:
+            logger.error(f"Google Drive query error during list query: {e}")
             raise
 
     def download_video(self, file_id: str, destination_path: Path) -> Path:
         """
         Streams and writes a video file from Google Drive in 10MB chunks to destination_path.
-        Supports videos of any length (including 2-3 minute and long-form reels).
+        Supports videos of any length (including 2-3 minute and long-form reels)
+        with automatic reconnection on socket resets (WinError 10054).
         """
-        try:
-            logger.info(f"Downloading file ID {file_id} to {destination_path.name}...")
-            request = self.service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        max_attempts = 4
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.info(f"Downloading file ID {file_id} to {destination_path.name} (attempt {attempt}/{max_attempts})...")
+                request = self.service.files().get_media(fileId=file_id, supportsAllDrives=True)
 
-            with io.FileIO(str(destination_path), "wb") as fh:
-                downloader = MediaIoBaseDownload(fh, request, chunksize=10 * 1024 * 1024)
-                done = False
-                while not done:
-                    status, done = downloader.next_chunk()
-                    if status:
-                        pct = int(status.progress() * 100)
-                        logger.debug(f"Download progress [{destination_path.name}]: {pct}%")
+                with io.FileIO(str(destination_path), "wb") as fh:
+                    downloader = MediaIoBaseDownload(fh, request, chunksize=10 * 1024 * 1024)
+                    done = False
+                    while not done:
+                        status, done = downloader.next_chunk()
+                        if status:
+                            pct = int(status.progress() * 100)
+                            logger.debug(f"Download progress [{destination_path.name}]: {pct}%")
 
-            file_size_mb = destination_path.stat().st_size / (1024 * 1024)
-            logger.info(f"Download finished: {destination_path.name} ({file_size_mb:.2f} MB)")
-            return destination_path
+                file_size_mb = destination_path.stat().st_size / (1024 * 1024)
+                logger.info(f"Download finished: {destination_path.name} ({file_size_mb:.2f} MB)")
+                return destination_path
 
-        except Exception as e:
-            logger.error(f"Failed while downloading file ID {file_id}: {e}")
-            if destination_path.exists():
-                destination_path.unlink(missing_ok=True)
-            raise
+            except Exception as e:
+                err_str = str(e).lower()
+                is_transient = any([
+                    "10054" in err_str,
+                    "forcibly closed" in err_str,
+                    "connection" in err_str,
+                    "timeout" in err_str,
+                    "socket" in err_str,
+                    isinstance(e, (ConnectionResetError, ConnectionError, TimeoutError, OSError))
+                ])
+                if is_transient and attempt < max_attempts:
+                    logger.warning(f"Download stream interrupted by network glitch ({e}). Refreshing connection and retrying in 3s...")
+                    try:
+                        self._init_service()
+                    except Exception:
+                        pass
+                    time.sleep(3)
+                    continue
+
+                logger.error(f"Failed while downloading file ID {file_id}: {e}")
+                if destination_path.exists():
+                    destination_path.unlink(missing_ok=True)
+                raise
 
     def _get_or_create_archive_folder(self) -> str:
         """
@@ -183,7 +255,9 @@ class DriveService:
             return self._archive_folder_id
 
         q = f"'{config.DRIVE_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder' and name = 'Uploaded_Reels' and trashed = false"
-        res = self.service.files().list(q=q, fields="files(id, name)", supportsAllDrives=True).execute()
+        res = self._execute_with_retry(
+            lambda svc: svc.files().list(q=q, fields="files(id, name)", supportsAllDrives=True)
+        )
         files = res.get("files", [])
         if files:
             self._archive_folder_id = files[0]["id"]
@@ -194,7 +268,9 @@ class DriveService:
             "mimeType": "application/vnd.google-apps.folder",
             "parents": [config.DRIVE_FOLDER_ID]
         }
-        folder = self.service.files().create(body=meta, fields="id", supportsAllDrives=True).execute()
+        folder = self._execute_with_retry(
+            lambda svc: svc.files().create(body=meta, fields="id", supportsAllDrives=True)
+        )
         self._archive_folder_id = folder.get("id")
         return self._archive_folder_id
 
@@ -202,38 +278,33 @@ class DriveService:
         """
         Moves the completed or skipped video/shortcut from the active queue folder to the 'Uploaded_Reels' folder,
         or unlinks it from the queue folder, or marks it trashed, or permanently deletes it.
-        Includes automatic retry for transient socket/connection errors.
+        Uses automatic retry and connection recovery for all operations.
         """
-        import time
-
-        # Step 1: Attempt to move to 'Uploaded_Reels' archive subfolder with retries
-        for attempt in range(3):
-            try:
-                archive_id = self._get_or_create_archive_folder()
-                self.service.files().update(
+        # Step 1: Attempt to move to 'Uploaded_Reels' archive subfolder
+        try:
+            archive_id = self._get_or_create_archive_folder()
+            self._execute_with_retry(
+                lambda svc: svc.files().update(
                     fileId=file_id,
                     addParents=archive_id,
                     removeParents=config.DRIVE_FOLDER_ID,
                     supportsAllDrives=True
-                ).execute()
-                logger.info(f"Item {file_id} successfully moved to 'Uploaded_Reels' archive folder.")
-                return True
-            except Exception as move_err:
-                err_msg = str(move_err)
-                if attempt < 2 and ("10054" in err_msg or "connection" in err_msg.lower() or "timeout" in err_msg.lower()):
-                    logger.warning(f"Transient connection glitch moving {file_id} to archive (attempt {attempt + 1}/3): {move_err}. Retrying in 2s...")
-                    time.sleep(2)
-                    continue
-                logger.warning(f"Move to archive folder failed for {file_id} ({move_err}). Trying unlinking from folder...")
-                break
+                )
+            )
+            logger.info(f"Item {file_id} successfully moved to 'Uploaded_Reels' archive folder.")
+            return True
+        except Exception as move_err:
+            logger.warning(f"Move to archive folder failed for {file_id} ({move_err}). Trying unlinking from folder...")
 
         # Step 2: Unlink/remove from the parent queue folder (does NOT require file ownership!)
         try:
-            self.service.files().update(
-                fileId=file_id,
-                removeParents=config.DRIVE_FOLDER_ID,
-                supportsAllDrives=True
-            ).execute()
+            self._execute_with_retry(
+                lambda svc: svc.files().update(
+                    fileId=file_id,
+                    removeParents=config.DRIVE_FOLDER_ID,
+                    supportsAllDrives=True
+                )
+            )
             logger.info(f"Item {file_id} successfully removed/unlinked from queue folder.")
             return True
         except Exception as unlink_err:
@@ -241,11 +312,13 @@ class DriveService:
 
         # Step 3: Attempt to mark as trashed
         try:
-            self.service.files().update(
-                fileId=file_id,
-                body={"trashed": True},
-                supportsAllDrives=True
-            ).execute()
+            self._execute_with_retry(
+                lambda svc: svc.files().update(
+                    fileId=file_id,
+                    body={"trashed": True},
+                    supportsAllDrives=True
+                )
+            )
             logger.info(f"Item {file_id} marked as trashed in Google Drive.")
             return True
         except Exception as trash_err:
@@ -253,7 +326,9 @@ class DriveService:
 
         # Step 4: Attempt direct permanent delete
         try:
-            self.service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+            self._execute_with_retry(
+                lambda svc: svc.files().delete(fileId=file_id, supportsAllDrives=True)
+            )
             logger.info(f"Item {file_id} permanently deleted from Google Drive.")
             return True
         except Exception as del_err:
