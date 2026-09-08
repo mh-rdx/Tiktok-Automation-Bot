@@ -350,10 +350,10 @@ class TikTokUploader:
                 if not post_btn:
                     raise TikTokUploadError("Could not find 'Post' button on TikTok Studio.")
 
-                # Wait until post button is enabled (supports 2-3 minute videos that take longer to process)
-                logger.info("Waiting for video upload & server processing to complete (up to 6 mins)...")
+                # Wait until post button is enabled (supports any duration video up to 10 mins)
+                logger.info("Waiting for video upload & server processing to complete (up to 15 mins)...")
                 is_ready = False
-                for attempt in range(120):  # 120 * 3s = 360 seconds (6 minutes)
+                for attempt in range(300):  # 300 * 3s = 900 seconds (15 minutes)
                     # Regularly handle any active modals that pop up during processing
                     self._handle_active_modals(page)
 
@@ -372,12 +372,12 @@ class TikTokUploader:
                     except Exception:
                         pass
 
-                    if attempt % 5 == 0:
+                    if attempt % 10 == 0:
                         logger.info(f"Video still processing on TikTok servers... ({attempt * 3}s elapsed)")
                     page.wait_for_timeout(3000)
 
                 if not is_ready:
-                    raise TikTokUploadError("Video processing timed out on TikTok Studio after 6 minutes.")
+                    raise TikTokUploadError("Video processing timed out on TikTok Studio after 15 minutes.")
 
                 # Check if video was flagged with restrictions by TikTok Content Check
                 if getattr(config, "SKIP_RESTRICTED_VIDEOS", True):
@@ -397,7 +397,7 @@ class TikTokUploader:
                 # Wait for publish confirmation & actively handle any confirmation/advisory modals
                 logger.info("Waiting for publish confirmation & handling any confirmation/advisory modals...")
                 published = False
-                for attempt in range(60):  # 60 * 2s = 120 seconds
+                for attempt in range(120):  # 120 * 2s = 240 seconds (4 minutes)
                     page.wait_for_timeout(2000)
 
                     # Check if video was flagged with restrictions

@@ -163,7 +163,7 @@ class BotOrchestrator:
 
     def calculate_sleep_seconds(self) -> int:
         """
-        Calculates interval delay: 7200 seconds (2 hours) + random anti-detection jitter.
+        Calculates interval delay: base seconds (e.g. 40 mins) + random anti-detection jitter.
         """
         base = config.POST_INTERVAL_SECONDS
         jitter = random.randint(config.JITTER_MIN_SECONDS, config.JITTER_MAX_SECONDS)
@@ -312,7 +312,7 @@ class BotOrchestrator:
         logger.info("==========================================================")
         logger.info("  TikTok Automation Background Daemon Online")
         logger.info(f"  Daily Cap: {config.DAILY_LIMIT} reels/day")
-        logger.info(f"  Base Interval: {config.POST_INTERVAL_SECONDS}s (2 hrs) + Anti-ban Jitter")
+        logger.info(f"  Base Interval: {config.POST_INTERVAL_SECONDS}s ({config.POST_INTERVAL_SECONDS // 60} mins) + Anti-ban Jitter")
         logger.info(f"  Drive Folder: {config.DRIVE_FOLDER_ID}")
         logger.info("==========================================================")
 

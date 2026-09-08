@@ -6,10 +6,11 @@ and re-encodes to H.264/AAC with fast presets.
 """
 
 import json
+import math
 import logging
 import subprocess
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Dict, Any
 
 import config
 
@@ -66,15 +67,16 @@ class VideoProcessor:
                     f"Please install FFmpeg and verify by running '{binary} -version' in your terminal."
                 )
 
-    def get_video_dimensions(self, video_path: Path) -> Tuple[int, int]:
+    def get_video_info(self, video_path: Path) -> Dict[str, Any]:
         """
-        Uses ffprobe to extract exact video width and height.
+        Uses ffprobe to extract video width, height, exact duration, and audio presence.
+        Supports any video duration and format.
         """
         cmd = [
             "ffprobe",
             "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
+            "-show_entries", "stream=codec_type,width,height,duration",
+            "-show_entries", "format=duration",
             "-of", "json",
             str(video_path)
         ]
@@ -89,27 +91,52 @@ class VideoProcessor:
             )
             data = json.loads(result.stdout)
             streams = data.get("streams", [])
-            if not streams:
+            video_streams = [s for s in streams if s.get("codec_type") == "video"]
+            if not video_streams:
                 raise VideoProcessingError(f"No video stream found in: {video_path}")
 
-            width = int(streams[0]["width"])
-            height = int(streams[0]["height"])
-            logger.debug(f"Detected dimensions for {video_path.name}: {width}x{height}")
-            return width, height
+            width = int(video_streams[0].get("width", 720))
+            height = int(video_streams[0].get("height", 1280))
+
+            # Duration detection from format container or video stream
+            raw_dur = data.get("format", {}).get("duration") or video_streams[0].get("duration") or 0.0
+            try:
+                duration = float(raw_dur)
+            except (ValueError, TypeError):
+                duration = 0.0
+
+            has_audio = any(s.get("codec_type") == "audio" for s in streams)
+
+            logger.info(
+                f"Inspected '{video_path.name}': {width}x{height}, "
+                f"duration={duration:.2f}s, has_audio={has_audio}"
+            )
+            return {
+                "width": width,
+                "height": height,
+                "duration": duration,
+                "has_audio": has_audio
+            }
 
         except Exception as e:
             logger.error(f"Error reading video metadata with ffprobe for {video_path}: {e}")
             raise VideoProcessingError(f"ffprobe failure: {e}")
 
+    def get_video_dimensions(self, video_path: Path) -> Tuple[int, int]:
+        """
+        Backwards-compatible helper returning width and height.
+        """
+        info = self.get_video_info(video_path)
+        return info["width"], info["height"]
+
     def apply_watermark(self, input_video: Path, output_video: Path) -> Path:
         """
         Applies a transparent channel logo watermark to the bottom-right corner.
-
-        Scaling calculation:
-          - Logo width is dynamically calculated as ~15% of the video width.
-          - We force target width to be an even integer (e.g. 108 -> 108, 107 -> 108)
-            so libx264's yuv420p chroma subsampling doesn't fail.
-          - Padding from bottom and right edges defaults to 10px.
+        Supports videos of ANY duration:
+          - Automatically loops ultra-short clips (< 3.0s) so they meet TikTok's minimum length requirement.
+          - Clamps ultra-long videos (> 600s / 10 mins) so they meet TikTok's web maximum limit.
+          - Robust against missing audio tracks (synthesizes clean stereo AAC).
+          - Applies transformative anti-duplicate zoom/tempo/metadata alterations.
         """
         if not config.WATERMARK_PATH.exists():
             raise FileNotFoundError(
@@ -117,21 +144,52 @@ class VideoProcessor:
                 f"Please place your transparent logo PNG at '{config.WATERMARK_PATH}'."
             )
 
-        video_w, video_h = self.get_video_dimensions(input_video)
+        info = self.get_video_info(input_video)
+        video_w = info["width"]
+        video_h = info["height"]
+        duration = info["duration"]
+        has_audio = info["has_audio"]
 
-        # Calculate 15% width and guarantee even integer
+        # Calculate 15% width and guarantee even integer for libx264
         target_logo_w = int(video_w * config.WATERMARK_WIDTH_RATIO)
         if target_logo_w % 2 != 0:
             target_logo_w += 1
-
-        # Keep a sane minimum so it remains visible on low-res videos
         target_logo_w = max(24, target_logo_w)
 
         padding = config.WATERMARK_PADDING
         logger.info(
             f"Processing watermark on '{input_video.name}': "
-            f"Base video={video_w}x{video_h}, Logo width={target_logo_w}px (15%), Padding={padding}px"
+            f"Base video={video_w}x{video_h}, Logo width={target_logo_w}px (15%), "
+            f"Duration={duration:.2f}s, Audio={has_audio}, Padding={padding}px"
         )
+
+        # 1. Handle any duration:
+        # TikTok Studio requires videos to be between 3 seconds and 10 minutes (600 seconds)
+        loop_args = []
+        if 0 < duration < 3.0:
+            loops = math.ceil(3.5 / duration) - 1
+            logger.info(
+                f"Short video detected ({duration:.2f}s < 3.0s limit). "
+                f"Auto-looping {loops + 1}x to meet TikTok minimum length (>= 3.5s)."
+            )
+            loop_args = ["-stream_loop", str(loops)]
+
+        clamp_args = []
+        if duration > 600.0:
+            logger.warning(
+                f"Video duration is {duration:.2f}s (> 600s). "
+                f"Clamping to 599s to satisfy TikTok's 10-minute web upload limit."
+            )
+            clamp_args = ["-t", "599"]
+
+        # 2. Audio handling for any duration / missing audio
+        if has_audio:
+            audio_filter = "[0:a]atempo=1.02[outa]"
+            map_audio = ["-map", "[outa]"]
+        else:
+            logger.info("No audio track detected. Synthesizing silent stereo AAC stream for full TikTok compatibility.")
+            audio_filter = "anullsrc=r=44100:cl=stereo[outa]"
+            map_audio = ["-map", "[outa]", "-shortest"]
 
         use_anti_dup = getattr(config, "ANTI_DUPLICATE_FILTER", True)
 
@@ -145,33 +203,37 @@ class VideoProcessor:
 
         if use_anti_dup:
             logger.info("Applying Anti-Duplicate & Transformative filter (micro-zoom, color grading, 1.02x tempo, metadata stripping).")
-            # Filter explanation:
-            # 1. crop+scale: micro-crops edges to strip hardcoded logos and alter pixel grids
-            # 2. eq: slight contrast/brightness tweak alters perceptual color histograms
-            # 3. setpts+atempo: 1.02x speed shifts frame durations and audio waveforms (breaks hash match)
-            # 4. overlay: positions TIME PASS logo at bottom-right
             filter_complex = (
                 f"[0:v]crop={crop_w}:{crop_h},scale={video_w}:{video_h},"
                 f"eq=contrast=1.02:brightness=0.01:saturation=1.03,setpts=0.98039*PTS[v0];"
                 f"[1:v]scale={target_logo_w}:-1[wm];"
                 f"[v0][wm]overlay=W-w-{padding}:H-h-{padding}:format=auto[outv];"
-                f"[0:a]atempo=1.02[outa]"
+                f"{audio_filter}"
             )
-            map_args = ["-map", "[outv]", "-map", "[outa]"]
         else:
-            filter_complex = (
-                f"[1:v]scale={target_logo_w}:-1[wm];"
-                f"[0:v][wm]overlay=W-w-{padding}:H-h-{padding}:format=auto"
-            )
-            map_args = []
+            if has_audio:
+                filter_complex = (
+                    f"[1:v]scale={target_logo_w}:-1[wm];"
+                    f"[0:v][wm]overlay=W-w-{padding}:H-h-{padding}:format=auto[outv]"
+                )
+                map_audio = ["-map", "0:a"]
+            else:
+                filter_complex = (
+                    f"[1:v]scale={target_logo_w}:-1[wm];"
+                    f"[0:v][wm]overlay=W-w-{padding}:H-h-{padding}:format=auto[outv];"
+                    f"anullsrc=r=44100:cl=stereo[outa]"
+                )
+                map_audio = ["-map", "[outa]", "-shortest"]
 
         cmd = [
             "ffmpeg",
             "-y",                                # Overwrite destination if it exists
+        ] + loop_args + [
             "-i", str(input_video),              # Primary video stream [0]
             "-i", str(config.WATERMARK_PATH),    # Logo watermark stream [1]
             "-filter_complex", filter_complex,
-        ] + map_args + [
+            "-map", "[outv]",
+        ] + map_audio + clamp_args + [
             "-c:v", "libx264",                   # Fast, universally supported H.264
             "-preset", "fast",                   # Balance between encode speed & compression
             "-crf", "23",                        # Visually near-lossless standard for web

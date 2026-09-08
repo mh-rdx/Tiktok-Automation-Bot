@@ -48,10 +48,10 @@ ANTI_DUPLICATE_FILTER = os.getenv("ANTI_DUPLICATE_FILTER", "true").lower() in ("
 SKIP_RESTRICTED_VIDEOS = os.getenv("SKIP_RESTRICTED_VIDEOS", "true").lower() in ("true", "1", "yes")
 
 # Scheduling & Rate Limiting Settings
-DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "5"))
-POST_INTERVAL_SECONDS = int(os.getenv("POST_INTERVAL_SECONDS", "7200"))
-JITTER_MIN_SECONDS = int(os.getenv("JITTER_MIN_SECONDS", "60"))
-JITTER_MAX_SECONDS = int(os.getenv("JITTER_MAX_SECONDS", "600"))
+DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "25"))
+POST_INTERVAL_SECONDS = int(os.getenv("POST_INTERVAL_SECONDS", "2400"))
+JITTER_MIN_SECONDS = int(os.getenv("JITTER_MIN_SECONDS", "30"))
+JITTER_MAX_SECONDS = int(os.getenv("JITTER_MAX_SECONDS", "180"))
 EMPTY_QUEUE_SLEEP_SECONDS = int(os.getenv("EMPTY_QUEUE_SLEEP_SECONDS", "900"))
 
 # Internal File Paths
