@@ -201,37 +201,61 @@ class DriveService:
     def delete_video(self, file_id: str) -> bool:
         """
         Moves the completed or skipped video/shortcut from the active queue folder to the 'Uploaded_Reels' folder,
-        or marks it trashed, or permanently deletes it.
+        or unlinks it from the queue folder, or marks it trashed, or permanently deletes it.
+        Includes automatic retry for transient socket/connection errors.
         """
+        import time
+
+        # Step 1: Attempt to move to 'Uploaded_Reels' archive subfolder with retries
+        for attempt in range(3):
+            try:
+                archive_id = self._get_or_create_archive_folder()
+                self.service.files().update(
+                    fileId=file_id,
+                    addParents=archive_id,
+                    removeParents=config.DRIVE_FOLDER_ID,
+                    supportsAllDrives=True
+                ).execute()
+                logger.info(f"Item {file_id} successfully moved to 'Uploaded_Reels' archive folder.")
+                return True
+            except Exception as move_err:
+                err_msg = str(move_err)
+                if attempt < 2 and ("10054" in err_msg or "connection" in err_msg.lower() or "timeout" in err_msg.lower()):
+                    logger.warning(f"Transient connection glitch moving {file_id} to archive (attempt {attempt + 1}/3): {move_err}. Retrying in 2s...")
+                    time.sleep(2)
+                    continue
+                logger.warning(f"Move to archive folder failed for {file_id} ({move_err}). Trying unlinking from folder...")
+                break
+
+        # Step 2: Unlink/remove from the parent queue folder (does NOT require file ownership!)
         try:
-            # 1. Attempt to move to archive subfolder
-            archive_id = self._get_or_create_archive_folder()
             self.service.files().update(
                 fileId=file_id,
-                addParents=archive_id,
                 removeParents=config.DRIVE_FOLDER_ID,
                 supportsAllDrives=True
             ).execute()
-            logger.info(f"Item {file_id} successfully moved to 'Uploaded_Reels' archive folder.")
+            logger.info(f"Item {file_id} successfully removed/unlinked from queue folder.")
             return True
-        except Exception as move_err:
-            logger.warning(f"Move to archive folder failed for {file_id} ({move_err}). Trying to mark as trashed...")
-            try:
-                # 2. Attempt to mark as trashed
-                self.service.files().update(
-                    fileId=file_id,
-                    body={"trashed": True},
-                    supportsAllDrives=True
-                ).execute()
-                logger.info(f"Item {file_id} marked as trashed in Google Drive.")
-                return True
-            except Exception as trash_err:
-                logger.warning(f"Trashing failed for {file_id} ({trash_err}). Trying direct permanent deletion...")
-                try:
-                    # 3. Attempt direct permanent delete
-                    self.service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
-                    logger.info(f"Item {file_id} permanently deleted from Google Drive.")
-                    return True
-                except Exception as del_err:
-                    logger.error(f"Could not remove {file_id} from Drive: {del_err}")
-                    return False
+        except Exception as unlink_err:
+            logger.warning(f"Unlinking {file_id} from parent folder failed ({unlink_err}). Trying trash/delete...")
+
+        # Step 3: Attempt to mark as trashed
+        try:
+            self.service.files().update(
+                fileId=file_id,
+                body={"trashed": True},
+                supportsAllDrives=True
+            ).execute()
+            logger.info(f"Item {file_id} marked as trashed in Google Drive.")
+            return True
+        except Exception as trash_err:
+            logger.warning(f"Trashing failed for {file_id} ({trash_err}). Trying direct permanent deletion...")
+
+        # Step 4: Attempt direct permanent delete
+        try:
+            self.service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+            logger.info(f"Item {file_id} permanently deleted from Google Drive.")
+            return True
+        except Exception as del_err:
+            logger.error(f"Could not remove {file_id} from Drive: {del_err}")
+            return False

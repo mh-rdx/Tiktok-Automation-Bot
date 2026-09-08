@@ -58,16 +58,29 @@ class StateManager:
                     if data.get("current_date") == today_str:
                         if "skipped_ids" not in data:
                             data["skipped_ids"] = []
+                        if "processed_ids" not in data:
+                            data["processed_ids"] = []
                         return data
+                    else:
+                        # Carry over processed_ids across days so old uploaded videos are never re-uploaded
+                        prev_processed = data.get("processed_ids", [])
+                        return {
+                            "current_date": today_str,
+                            "posts_today": 0,
+                            "last_post_timestamp": None,
+                            "skipped_ids": [],
+                            "processed_ids": prev_processed[-500:]
+                        }
             except Exception as e:
                 logger.warning(f"Could not parse existing state file ({e}). Initializing fresh state.")
 
-        # If file doesn't exist or belongs to a previous date, start fresh
+        # If file doesn't exist, start fresh
         fresh_state = {
             "current_date": today_str,
             "posts_today": 0,
             "last_post_timestamp": None,
-            "skipped_ids": []
+            "skipped_ids": [],
+            "processed_ids": []
         }
         self._save_state(fresh_state)
         return fresh_state
@@ -90,6 +103,8 @@ class StateManager:
             self.state["current_date"] = today_str
             self.state["posts_today"] = 0
             self.state["skipped_ids"] = []
+            if "processed_ids" not in self.state:
+                self.state["processed_ids"] = []
             self._save_state(self.state)
 
     @property
@@ -97,17 +112,26 @@ class StateManager:
         self.check_and_reset_daily()
         return self.state["posts_today"]
 
-    def record_successful_post(self) -> None:
+    def record_successful_post(self, *ids: str) -> None:
         self.check_and_reset_daily()
         self.state["posts_today"] += 1
         self.state["last_post_timestamp"] = datetime.now().isoformat()
+        if "processed_ids" not in self.state:
+            self.state["processed_ids"] = []
+        for i in ids:
+            if i and i not in self.state["processed_ids"]:
+                self.state["processed_ids"].append(i)
         self._save_state(self.state)
         logger.info(
             f"Post logged successfully. Total posted today: {self.state['posts_today']} / {config.DAILY_LIMIT}"
         )
 
+    def get_excluded_ids(self) -> set:
+        """Returns union of skipped and already-processed file/target IDs."""
+        return set(self.state.get("skipped_ids", [])) | set(self.state.get("processed_ids", []))
+
     def get_skipped_ids(self) -> set:
-        return set(self.state.get("skipped_ids", []))
+        return self.get_excluded_ids()
 
     def record_skipped_id(self, file_id: str) -> None:
         if "skipped_ids" not in self.state:
@@ -254,7 +278,7 @@ class BotOrchestrator:
                 bot_state["last_post_time"] = datetime.now()
                 # 4. Remove original from Google Drive to avoid duplicate reprocessing
                 self.drive.delete_video(file_id)
-                self.state_mgr.record_successful_post()
+                self.state_mgr.record_successful_post(file_id, download_id)
                 bot_state["posts_today"] = self.state_mgr.posts_today
                 bot_state["total_posts"] = bot_state.get("total_posts", 0) + 1
                 return True
